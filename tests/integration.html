@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kb-workout-tracker — integration</title>
+<link rel="stylesheet" href="../css/styles.css">
+<style>
+  #report { position: fixed; inset: 0; z-index: 9999; overflow: auto; padding: 1.2rem;
+            background: #12141a; color: #e6e8ee; font: 14px/1.6 ui-monospace, Menlo, monospace; }
+  #report li { list-style: none; border-bottom: 1px solid #23262f; padding: .3rem 0; }
+  .pass::before { content: "PASS  "; color: #7ee2a0; }
+  .fail::before { content: "FAIL  "; color: #ff6b6b; }
+  pre.err { color: #ffb4b4; margin: .3rem 0 .4rem 3.5rem; white-space: pre-wrap; }
+  #summary { padding: .7rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-weight: 700; }
+  .ok { background: #16351f; color: #7ee2a0; } .bad { background: #3a1a1e; color: #ff9d9d; }
+</style>
+</head>
+<body>
+<div id="report"><div id="summary">Running…</div><ul id="rows"></ul></div>
+
+<script type="module">
+/**
+ * End-to-end test of the real UI against a fake Drive and a fake Google
+ * sign-in. The headless suite in run.html covers the rules; this covers the
+ * wiring between them and the DOM — sign-in gate, file creation, logging a
+ * session, the save flow, and the offline queue.
+ *
+ * The page loads index.html's own markup rather than duplicating it, so this
+ * test cannot silently drift from the real document.
+ */
+
+const results = [];
+const check = (name, fn) => { try { fn(); results.push({ name, passed: true }); }
+                              catch (e) { results.push({ name, passed: false, error: e.message }); } };
+
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+function assertEq(a, b, msg) {
+  if (a !== b) throw new Error(`${msg}\n    expected: ${JSON.stringify(b)}\n    actual:   ${JSON.stringify(a)}`);
+}
+
+const waitFor = async (fn, label, timeout = 4000) => {
+  const start = Date.now();
+  for (;;) {
+    try { const v = fn(); if (v) return v; } catch {}
+    if (Date.now() - start > timeout) throw new Error(`timed out waiting for: ${label}`);
+    await new Promise((r) => setTimeout(r, 40));
+  }
+};
+
+// --- fake Drive -------------------------------------------------------------
+
+const drive = { files: new Map(), nextId: 1, version: 0 };
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+const realFetch = window.fetch.bind(window);
+
+window.fetch = async (input, init = {}) => {
+  const url = typeof input === 'string' ? input : input.url;
+  if (!/googleapis\.com/.test(url)) return realFetch(input, init);
+
+  if (window.__forceOffline) throw new TypeError('Failed to fetch');
+
+  const u = new URL(url);
+  const method = (init.method || 'GET').toUpperCase();
+
+  // List
+  if (u.pathname === '/drive/v3/files' && method === 'GET') {
+    const files = [...drive.files.entries()].map(([id, f]) => ({ id, name: f.name, version: f.version, modifiedTime: f.modifiedTime }));
+    return jsonResponse({ files });
+  }
+  // Create (multipart)
+  if (u.pathname === '/upload/drive/v3/files' && method === 'POST') {
+    const id = `file-${drive.nextId++}`;
+    const parts = String(init.body).split('\r\n\r\n');
+    let content = {};
+    try { content = JSON.parse(parts[2].split('\r\n--')[0]); } catch {}
+    drive.files.set(id, { name: 'kb-workout-tracker-data.json', content, version: ++drive.version, modifiedTime: new Date().toISOString() });
+    return jsonResponse({ id });
+  }
+  // Meta / content
+  const getMatch = u.pathname.match(/^\/drive\/v3\/files\/([^/]+)$/);
+  if (getMatch && method === 'GET') {
+    const f = drive.files.get(getMatch[1]);
+    if (!f) return jsonResponse({ error: 'not found' }, 404);
+    if (u.searchParams.get('alt') === 'media') {
+      return new Response(JSON.stringify(f.content), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return jsonResponse({ version: f.version, modifiedTime: f.modifiedTime });
+  }
+  // Update
+  const patchMatch = u.pathname.match(/^\/upload\/drive\/v3\/files\/([^/]+)$/);
+  if (patchMatch && method === 'PATCH') {
+    const f = drive.files.get(patchMatch[1]);
+    f.content = JSON.parse(init.body);
+    f.version = ++drive.version;
+    f.modifiedTime = new Date().toISOString();
+    return jsonResponse({ version: f.version, modifiedTime: f.modifiedTime });
+  }
+  return jsonResponse({ error: `unhandled ${method} ${u.pathname}` }, 500);
+};
+
+// --- fake Google Identity Services -----------------------------------------
+
+// Silent renewal fails until an interactive sign-in has happened, which is
+// what a first run genuinely looks like.
+window.__hasConsented = false;
+window.__authLog = [];
+
+window.google = {
+  accounts: {
+    oauth2: {
+      initTokenClient(config) {
+        window.__authLog.push('initTokenClient');
+        const client = {
+          callback: config.callback,
+          requestAccessToken({ prompt }) {
+            window.__authLog.push(`request prompt=${JSON.stringify(prompt)}`);
+            setTimeout(() => {
+              if (prompt === '' && !window.__hasConsented) {
+                window.__authLog.push('-> reject (silent, no consent yet)');
+                client.callback({ error: 'interaction_required' });
+              } else {
+                window.__hasConsented = true;
+                window.__authLog.push('-> resolve token');
+                client.callback({ access_token: 'fake-token', expires_in: 3600 });
+              }
+            }, 10);
+          },
+        };
+        return client;
+      },
+      revoke(_t, cb) { window.__hasConsented = false; cb?.(); },
+    },
+  },
+};
+
+// --- load the real markup, then the real app --------------------------------
+
+localStorage.clear();
+
+const html = await (await fetch('../index.html')).text();
+const doc = new DOMParser().parseFromString(html, 'text/html');
+const report = document.getElementById('report');
+document.body.innerHTML = doc.body.innerHTML;
+document.body.appendChild(report);
+// The inline module tag from index.html isn't executed by innerHTML; import it.
+await import('../js/app.js');
+
+// --- the run ----------------------------------------------------------------
+
+try {
+  // T1 — first open, no prior sign-in.
+  //
+  // This deliberately clicks Sign in while boot's silent renewal is still in
+  // flight, because that overlap is exactly what broke: the GIS token client
+  // has one `callback` slot, so the interactive request overwrote the silent
+  // one's handler and then received the silent one's rejection. DriveAuth now
+  // serialises token requests; leaving the race in the test keeps that fixed.
+  await waitFor(() => !document.getElementById('view-signin').hidden, 'sign-in gate');
+  check('T1 — first open shows the sign-in gate', () => {
+    assert(!document.getElementById('view-signin').hidden, 'sign-in view should be visible');
+    assert(document.getElementById('tabbar').hidden, 'tabs hidden until signed in');
+    assertEq(drive.files.size, 0, 'nothing touched in Drive before sign-in');
+  });
+
+  // T2 — sign in; the data file is created.
+  document.getElementById('btn-signin').click();
+  await waitFor(() => document.getElementById('view-signin').hidden, 'signed in');
+  check('T2 — signing in creates data.json and loads the app', () => {
+    assertEq(drive.files.size, 1, 'exactly one data file created');
+    assertEq([...drive.files.values()][0].name, 'kb-workout-tracker-data.json', 'file name');
+    assert(!document.getElementById('tabbar').hidden, 'tabs now available');
+  });
+
+  // Start a cycle.
+  const startBtn = await waitFor(() => document.querySelector('[data-act="start-cycle"]'), 'start-cycle button');
+  startBtn.click();
+  await waitFor(() => document.querySelector('[data-act="save-workout"]'), 'session view');
+
+  check('a new cycle opens on week 1, Day A', () => {
+    const heading = document.querySelector('#view-today h2').textContent;
+    assert(heading.startsWith('Day A'), `expected Day A, got "${heading}"`);
+    assert(/Week 1 of 13/.test(document.querySelector('#view-today .muted').textContent), 'week 1');
+  });
+
+  check('T12 — the first target on screen is verbatim from the source document', () => {
+    const target = document.querySelector('.ex-target').textContent.trim();
+    assertEq(target, '4x12 @ 16kg', 'KB Swing, Block 1');
+  });
+
+  // T18 — log every set of the first exercise, then save.
+  const setValue = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+  document.querySelectorAll('input[data-id="kb-swing-2h"]').forEach((el) => {
+    const f = el.dataset.field;
+    setValue(el, f === 'kg' ? 16 : f === 'reps' ? 12 : 7);
+  });
+
+  document.querySelector('[data-act="save-workout"]').click();
+  await waitFor(() => document.getElementById('sync-badge').dataset.state === 'synced', 'save confirmed');
+
+  const stored = () => [...drive.files.values()][0].content;
+
+  check('T6 / T18 — the saved session lands in Drive with the values entered', () => {
+    const d = stored();
+    assertEq(d.sessions.length, 1, 'one session written');
+    const s = d.sessions[0];
+    assertEq(s.dayType, 'A', 'day type');
+    assertEq(s.weekInCycle, 1, 'week');
+    const swing = s.exercises.find((e) => e.exerciseId === 'kb-swing-2h');
+    assertEq(swing.sets.length, 4, 'all four sets stored');
+    assertEq(swing.sets[0].kg, 16, 'weight');
+    assertEq(swing.sets[0].reps, 12, 'reps');
+    assertEq(swing.sets[3].rpe, 7, 'RPE stored as entered, 1-10');
+  });
+
+  check('the sync badge reads synced and nothing is left queued', () => {
+    assertEq(document.getElementById('sync-badge').dataset.state, 'synced', 'badge state');
+    assertEq(JSON.parse(localStorage.getItem('kbwt.pending')).length, 0, 'queue drained');
+  });
+
+  check('the session sequence advanced to Day B', () => {
+    assert(document.querySelector('#view-today h2').textContent.startsWith('Day B'), 'next session is B');
+  });
+
+  // T30 — log offline.
+  window.__forceOffline = true;
+  Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+
+  document.querySelectorAll('input[data-id="goblet-squat-rotation"]').forEach((el) => {
+    const f = el.dataset.field;
+    setValue(el, f === 'kg' ? 12 : f === 'reps' ? 8 : 6);
+  });
+  document.querySelector('[data-act="save-workout"]').click();
+  await waitFor(() => JSON.parse(localStorage.getItem('kbwt.pending')).length > 0, 'queued offline');
+
+  check('T30 — saving offline queues without error and shows "not yet synced"', () => {
+    assertEq(JSON.parse(localStorage.getItem('kbwt.pending')).length, 1, 'one op queued');
+    assertEq(stored().sessions.length, 1, 'Drive untouched while offline');
+    const badge = document.getElementById('sync-badge');
+    assertEq(badge.dataset.state, 'offline', 'badge shows offline');
+    assert(/queued/i.test(badge.textContent), `badge should say queued, got "${badge.textContent}"`);
+  });
+
+  check('the offline session is still visible locally', () => {
+    assertEq(JSON.parse(localStorage.getItem('kbwt.snapshot')).sessions.length, 2, 'held in the local snapshot');
+  });
+
+  // T31 — reconnect.
+  window.__forceOffline = false;
+  Object.defineProperty(navigator, 'onLine', { value: true, configurable: true });
+  window.dispatchEvent(new Event('online'));
+  await waitFor(() => document.getElementById('sync-badge').dataset.state === 'synced', 'reconnect flush');
+
+  check('T31 — the queued save completes automatically on reconnect', () => {
+    assertEq(stored().sessions.length, 2, 'both sessions now in Drive');
+    assertEq(JSON.parse(localStorage.getItem('kbwt.pending')).length, 0, 'queue drained');
+    const b = stored().sessions.find((s) => s.dayType === 'B');
+    assertEq(b.exercises.find((e) => e.exerciseId === 'goblet-squat-rotation').sets[0].kg, 12, 'offline values intact');
+  });
+
+  // T11 — delete a past entry.
+  document.querySelector('.tab[data-view="history"]').click();
+  const del = await waitFor(() => document.querySelector('[data-act="delete-session"]'), 'delete button');
+  window.confirm = () => true;
+  del.click();
+  await waitFor(() => stored().sessions.length === 1, 'delete synced');
+
+  check('T11 — deleting a past entry syncs and leaves a tombstone', () => {
+    assertEq(stored().sessions.length, 1, 'one session removed');
+    assertEq(stored().deleted.length, 1, 'tombstone written so a stale device cannot resurrect it');
+  });
+
+} catch (err) {
+  results.push({ name: 'run aborted', passed: false, error: `${err.message}\n${err.stack || ''}` });
+}
+
+// --- report -----------------------------------------------------------------
+
+const failed = results.filter((r) => !r.passed);
+document.getElementById('rows').innerHTML = results.map((r) =>
+  `<li class="${r.passed ? 'pass' : 'fail'}">${r.name}</li>` +
+  (r.passed ? '' : `<pre class="err">${String(r.error).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>`)
+).join('');
+const s = document.getElementById('summary');
+s.className = failed.length ? 'bad' : 'ok';
+s.textContent = failed.length ? `${failed.length} FAILED of ${results.length}` : `All ${results.length} integration checks passed`;
+window.__integrationResults = { total: results.length, failed: failed.length, results };
+console.log(`INTEGRATION: ${results.length - failed.length}/${results.length} passed`);
+failed.forEach((f) => console.error(`FAIL: ${f.name}\n${f.error}`));
+</script>
+</body>
+</html>

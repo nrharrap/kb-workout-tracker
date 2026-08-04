@@ -72,11 +72,27 @@ export class DriveAuth {
   /**
    * @param {boolean} interactive  false attempts a silent renewal against an
    *   existing Google session; true shows the account chooser/consent screen.
+   *
+   * Requests are serialised. The GIS token client has a single `callback`
+   * slot, so two overlapping requests would have the second overwrite the
+   * first's handler and then receive the first's result. That is not
+   * hypothetical: the silent renewal fired at boot overlaps with the user
+   * tapping "Sign in", and it also happens whenever two Drive calls hit a 401
+   * together and both reach for a fresh token.
    */
-  requestToken({ interactive = false } = {}) {
+  requestToken(options = {}) {
+    const run = () => this._requestTokenNow(options);
+    // `.then(run, run)` so a rejected earlier request doesn't stall the queue.
+    this._chain = (this._chain || Promise.resolve()).then(run, run);
+    return this._chain;
+  }
+
+  _requestTokenNow({ interactive = false } = {}) {
     if (!this.tokenClient) {
       return Promise.reject(new AuthError('Google sign-in is unavailable — check your connection.'));
     }
+    // A request queued behind one that already succeeded needs no round trip.
+    if (this.isSignedIn()) return Promise.resolve(this.accessToken);
 
     return new Promise((resolve, reject) => {
       this.tokenClient.callback = (response) => {
