@@ -73,29 +73,53 @@ export class DriveAuth {
    * @param {boolean} interactive  false attempts a silent renewal against an
    *   existing Google session; true shows the account chooser/consent screen.
    *
-   * Requests are serialised. The GIS token client has a single `callback`
-   * slot, so two overlapping requests would have the second overwrite the
-   * first's handler and then receive the first's result. That is not
-   * hypothetical: the silent renewal fired at boot overlaps with the user
-   * tapping "Sign in", and it also happens whenever two Drive calls hit a 401
-   * together and both reach for a fresh token.
+   * Interactive requests fire immediately and synchronously — `_fire()` is
+   * called directly, not queued behind a `.then()`. Browsers only let the
+   * OAuth popup through when `requestAccessToken()` is called within the
+   * same call stack as the triggering click; even a single microtask of
+   * delay is enough for some browsers (desktop Safari in particular, some
+   * Chrome configurations too) to decide it wasn't user-initiated and block
+   * it silently — no error, the button just looks like it does nothing. That
+   * was a real bug here, not hypothetical: it worked on mobile, which is
+   * more lenient about this, and failed on desktop.
+   *
+   * Silent requests still queue behind whatever's pending. The GIS token
+   * client has a single `callback` slot, so two overlapping silent renewals
+   * (e.g. two Drive calls hitting a 401 at once) would have the second
+   * overwrite the first's handler and then receive the first's result —
+   * queuing is what avoids that. An interactive request never waits in this
+   * queue; `_fire()` instead supersedes whatever silent request was in
+   * flight (rejecting it) so the two can't cross-resolve each other either.
    */
   requestToken(options = {}) {
-    const run = () => this._requestTokenNow(options);
+    if (!this.tokenClient) {
+      return Promise.reject(new AuthError('Google sign-in is unavailable — check your connection.'));
+    }
+
+    if (options.interactive) {
+      return this._fire(options);
+    }
+
+    const run = () => this._fire(options);
     // `.then(run, run)` so a rejected earlier request doesn't stall the queue.
     this._chain = (this._chain || Promise.resolve()).then(run, run);
     return this._chain;
   }
 
-  _requestTokenNow({ interactive = false } = {}) {
-    if (!this.tokenClient) {
-      return Promise.reject(new AuthError('Google sign-in is unavailable — check your connection.'));
-    }
-    // A request queued behind one that already succeeded needs no round trip.
+  _fire({ interactive = false } = {}) {
     if (this.isSignedIn()) return Promise.resolve(this.accessToken);
 
+    // A newer request (typically an interactive one jumping the queue)
+    // supersedes whatever's in flight, rather than letting the two race for
+    // the token client's one callback slot.
+    if (this._pendingReject) {
+      this._pendingReject(new AuthError('Superseded by a newer sign-in request'));
+    }
+
     return new Promise((resolve, reject) => {
+      this._pendingReject = reject;
       this.tokenClient.callback = (response) => {
+        this._pendingReject = null;
         if (response.error) {
           // The user closing or declining the popup is a normal outcome, not
           // a crash — the caller shows a retry rather than an error state.
@@ -111,6 +135,7 @@ export class DriveAuth {
       try {
         this.tokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
       } catch (err) {
+        this._pendingReject = null;
         reject(new AuthError(err.message));
       }
     });
