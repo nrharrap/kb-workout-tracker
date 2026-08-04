@@ -1,0 +1,11 @@
+{
+  "name": "kb-workout-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Golf Strength & Speed Programme tracker. The app itself has no build step — this file exists only so Node's test runner can import the same ES modules the browser loads.",
+  "scripts": {
+    "test": "node --test tests/",
+    "serve": "python3 -m http.server 5500"
+  }
+}
