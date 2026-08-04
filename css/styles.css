@@ -1,0 +1,388 @@
+/*
+ * Mobile-first. The primary use case is a phone held in one hand next to the
+ * kettlebells, so: single column, 48px minimum tap targets, 16px minimum font
+ * on inputs (anything smaller makes iOS Safari zoom on focus), and the save
+ * action plus the tab bar sit inside thumb reach at the bottom of the screen.
+ */
+
+:root {
+  --bg: #0f1116;
+  --surface: #171a21;
+  --surface-2: #1e222b;
+  --line: #2a2f3a;
+  --text: #e8eaf0;
+  --muted: #949cb0;
+  --accent: #4f9dff;
+  --accent-ink: #06121f;
+  --good: #48c98a;
+  --warn: #f0b344;
+  --bad: #ff6b6b;
+  --radius: 12px;
+  --tap: 48px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f9;
+    --surface: #ffffff;
+    --surface-2: #eef0f5;
+    --line: #d8dce6;
+    --text: #151821;
+    --muted: #5d6577;
+    --accent: #1668d6;
+    --accent-ink: #ffffff;
+    --good: #1a8a55;
+    --warn: #96690a;
+    --bad: #c8322f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: contain;
+}
+
+h1, h2, h3 { margin: 0; line-height: 1.25; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1rem; }
+p { margin: 0 0 .6rem; }
+p:last-child { margin-bottom: 0; }
+
+.muted { color: var(--muted); }
+/* Visually hidden but still announced — labels on sets 2+ (see stepper()). */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.small { font-size: .85rem; }
+.error { color: var(--bad); }
+.centred { text-align: center; }
+.row { display: flex; gap: .5rem; align-items: center; }
+.row-between { display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+.wrap { flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+
+/* --- header ------------------------------------------------------------- */
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: max(.6rem, env(safe-area-inset-top)) 1rem .6rem;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-title h1 { font-size: 1.05rem; letter-spacing: -.01em; }
+.header-sub { margin: 0; font-size: .78rem; color: var(--muted); }
+
+.sync-badge {
+  flex: none;
+  min-height: 34px;
+  padding: .3rem .7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sync-badge[data-state="synced"]   { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); }
+.sync-badge[data-state="pending"]  { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.sync-badge[data-state="offline"]  { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.sync-badge[data-state="error"]    { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+
+/* --- layout ------------------------------------------------------------- */
+
+#main {
+  max-width: 620px;
+  margin: 0 auto;
+  /* Clear the fixed tab bar, plus the iPhone home indicator. */
+  padding: 1rem 1rem calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+.view { display: block; }
+.view[hidden] { display: none; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-bottom: .85rem;
+}
+.card > h2, .card > h3 { margin-bottom: .5rem; }
+
+/* --- banners ------------------------------------------------------------ */
+
+.banner {
+  border-radius: var(--radius);
+  padding: .85rem 1rem;
+  margin-bottom: .85rem;
+  border: 1px solid;
+  font-size: .92rem;
+}
+.banner h3 { margin-bottom: .35rem; font-size: .95rem; }
+.banner-warn { background: color-mix(in srgb, var(--warn) 12%, var(--surface)); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.banner-accent { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.banner-bad { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.banner .row { margin-top: .6rem; }
+
+/* --- buttons ------------------------------------------------------------ */
+
+.btn {
+  min-height: var(--tap);
+  padding: .6rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn-lg { width: 100%; font-size: 1.05rem; min-height: 54px; }
+.btn-sm { min-height: 38px; padding: .35rem .7rem; font-size: .85rem; font-weight: 500; }
+.btn-ghost { background: transparent; }
+.btn-danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+
+/* The save button is the one control that must never be a reach. */
+.save-bar {
+  position: sticky;
+  /* Sits flush on top of the tab bar (56px), so nothing shows through the gap
+     between the two. */
+  bottom: calc(3.5rem + env(safe-area-inset-bottom));
+  z-index: 10;
+  margin-top: 1rem;
+  padding: .9rem 0 .6rem;
+  background: linear-gradient(to top, var(--bg) 65%, transparent);
+}
+
+/* --- exercise cards ----------------------------------------------------- */
+
+.ex-head { display: flex; justify-content: space-between; align-items: flex-start; gap: .5rem; }
+.ex-name { font-size: 1rem; font-weight: 700; }
+.ex-target {
+  display: inline-block;
+  margin-top: .2rem;
+  padding: .15rem .5rem;
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: .85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.ex-note { margin-top: .4rem; font-size: .82rem; color: var(--muted); }
+.ex-adjust { color: var(--warn); font-size: .8rem; margin-top: .3rem; }
+
+/*
+ * Set rows: the set number gets its own full-width line rather than a left
+ * column, because on a 375px screen that column plus two 34px stepper buttons
+ * left the number field about 21px wide — the value was there but clipped to
+ * invisible. Full width gives each field ~99px, so the input can hold "12.5".
+ */
+.set-block { margin-top: .7rem; }
+.set-label {
+  font-size: .72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: .25rem;
+}
+.set-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: .4rem; align-items: end; }
+.field { min-width: 0; }
+.field label { display: block; font-size: .7rem; color: var(--muted); margin-bottom: .15rem; text-transform: uppercase; letter-spacing: .04em; }
+
+.stepper { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--surface-2); }
+.stepper button {
+  width: 30px;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 1.2rem;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.stepper button:active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.stepper input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: center;
+  /* 16px keeps iOS Safari from zooming the viewport on focus. */
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: .55rem 0;
+  -moz-appearance: textfield;
+}
+.stepper input::-webkit-outer-spin-button,
+.stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.stepper input:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.stepper.rpe-capped input { color: var(--warn); }
+
+textarea, input[type="text"], input[type="number"], select {
+  width: 100%;
+  font: inherit;
+  font-size: 16px;
+  padding: .6rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+textarea { resize: vertical; min-height: 2.6rem; }
+
+/* --- checkboxes / toggles ------------------------------------------------ */
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  min-height: var(--tap);
+  padding: .2rem 0;
+  cursor: pointer;
+}
+.check input { width: 26px; height: 26px; flex: none; accent-color: var(--accent); }
+.check span { font-size: .95rem; }
+.check .presc { color: var(--muted); font-size: .82rem; }
+
+/* --- stats -------------------------------------------------------------- */
+
+.stat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .6rem; }
+.stat {
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: .7rem;
+}
+.stat .k { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.stat .v { font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: .15rem; }
+.stat .sub { font-size: .75rem; color: var(--muted); }
+
+.pill {
+  display: inline-block;
+  white-space: nowrap;
+  padding: .15rem .55rem;
+  border-radius: 999px;
+  font-size: .72rem;
+  font-weight: 700;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.pill-accent { background: color-mix(in srgb, var(--accent) 20%, var(--surface)); color: var(--accent); }
+.pill-warn { background: color-mix(in srgb, var(--warn) 20%, var(--surface)); color: var(--warn); }
+
+/* --- history ------------------------------------------------------------ */
+
+.log-entry { border-top: 1px solid var(--line); padding: .8rem 0; }
+.log-entry:first-of-type { border-top: 0; }
+.log-sets { font-size: .85rem; color: var(--muted); margin-top: .15rem; }
+.log-actions { justify-content: flex-end; margin-top: .5rem; }
+.chart-wrap { overflow-x: auto; }
+svg.chart { display: block; width: 100%; height: auto; }
+
+table.deltas { width: 100%; border-collapse: collapse; font-size: .9rem; }
+table.deltas th, table.deltas td { text-align: left; padding: .45rem .3rem; border-bottom: 1px solid var(--line); }
+table.deltas td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.delta-up { color: var(--good); }
+.delta-down { color: var(--bad); }
+.delta-flat { color: var(--muted); }
+
+/* --- tab bar ------------------------------------------------------------ */
+
+.tabbar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tabbar[hidden] { display: none; }
+.tab {
+  min-height: 56px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: .7rem;
+  font-weight: 600;
+  font-family: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .15rem;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.tab-i { font-size: 1.1rem; line-height: 1; }
+.tab[aria-current="page"] { color: var(--accent); }
+
+/* --- modal -------------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0,0,0,.6);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 1rem;
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+}
+@media (min-width: 480px) { .modal-backdrop { align-items: center; } }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 1.1rem;
+  width: 100%;
+  max-width: 520px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal h2 { margin-bottom: .5rem; }
+.modal .btn { width: 100%; margin-top: .5rem; }
+.modal pre {
+  background: var(--surface-2);
+  padding: .6rem;
+  border-radius: 8px;
+  font-size: .78rem;
+  overflow-x: auto;
+  max-height: 30vh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

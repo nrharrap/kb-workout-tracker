@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Golf Tracker</title>
+<meta name="description" content="Golf Strength &amp; Speed Programme tracker">
+<meta name="theme-color" content="#12141a">
+
+<!-- Home-screen install on iOS Safari (PRD 5). -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Golf Tracker">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">
+    <h1>Golf Tracker</h1>
+    <p id="header-sub" class="header-sub"></p>
+  </div>
+  <button id="sync-badge" class="sync-badge" type="button" aria-live="polite">…</button>
+</header>
+
+<main id="main">
+
+  <!-- Sign-in gate (T1, T4) -->
+  <section id="view-signin" class="view" hidden>
+    <div class="card centred">
+      <h2>Sign in to continue</h2>
+      <p class="muted">
+        Your logged sessions live in a private file in your own Google Drive.
+        This app can only see the one file it creates — nothing else in your Drive.
+      </p>
+      <button id="btn-signin" class="btn btn-primary btn-lg" type="button">Sign in with Google</button>
+      <p id="signin-error" class="error" hidden></p>
+      <p id="signin-offline" class="muted small" hidden></p>
+    </div>
+  </section>
+
+  <!-- Today / session -->
+  <section id="view-today" class="view" hidden></section>
+
+  <!-- History -->
+  <section id="view-history" class="view" hidden></section>
+
+  <!-- Retest -->
+  <section id="view-retest" class="view" hidden></section>
+
+  <!-- Progress -->
+  <section id="view-progress" class="view" hidden></section>
+
+</main>
+
+<nav id="tabbar" class="tabbar" hidden>
+  <button class="tab" data-view="today" type="button" aria-current="page"><span class="tab-i">▣</span>Today</button>
+  <button class="tab" data-view="history" type="button"><span class="tab-i">≡</span>History</button>
+  <button class="tab" data-view="retest" type="button"><span class="tab-i">◎</span>Retest</button>
+  <button class="tab" data-view="progress" type="button"><span class="tab-i">▲</span>Progress</button>
+</nav>
+
+<div id="modal-root"></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
