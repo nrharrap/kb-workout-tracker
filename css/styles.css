@@ -182,7 +182,33 @@ p:last-child { margin-bottom: 0; }
 
 /* --- exercise cards ----------------------------------------------------- */
 
-.ex-head { display: flex; justify-content: space-between; align-items: flex-start; gap: .5rem; }
+.ex-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: .5rem;
+  cursor: pointer;
+  border-radius: 8px;
+  margin: -.2rem -.2rem 0;
+  padding: .2rem .2rem 0;
+}
+.ex-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ex-chevron {
+  flex: none;
+  margin-top: .3rem;
+  font-size: .8rem;
+  color: var(--muted);
+  transition: transform .15s ease;
+}
+.card.is-collapsed .ex-chevron { transform: rotate(-90deg); }
+.card.is-collapsed .ex-body { display: none; }
+.ex-done {
+  display: inline-block;
+  margin-left: .4rem;
+  font-size: .72rem;
+  font-weight: 700;
+  color: var(--good);
+}
 .ex-name { font-size: 1rem; font-weight: 700; }
 .ex-target {
   display: inline-block;
@@ -212,6 +238,9 @@ p:last-child { margin-bottom: 0; }
   margin-bottom: .25rem;
 }
 .set-fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: .4rem; align-items: end; }
+/* Bodyweight/band exercises (push-ups, deadbug, Pallof press) drop the kg
+   field — two fields get more room than a leftover third of a three-col grid. */
+.set-fields-2col { grid-template-columns: repeat(2, 1fr); }
 .field { min-width: 0; }
 .field label { display: block; font-size: .7rem; color: var(--muted); margin-bottom: .15rem; text-transform: uppercase; letter-spacing: .04em; }
 
@@ -381,6 +410,52 @@ table.deltas td.num { text-align: right; font-variant-numeric: tabular-nums; }
   font-size: .78rem;
   overflow-x: auto;
   max-height: 30vh;
+}
+
+/* --- desktop -------------------------------------------------------------
+ * Mobile stays the priority layout (PRD 5) — same markup and components,
+ * just given room. The one structural change is the tab bar: a floating
+ * bottom dock reads as mobile-app chrome on a laptop, so here it moves to a
+ * static row under the header instead, which is the more familiar desktop
+ * pattern. Reordered with flexbox `order` rather than moving markup, so the
+ * mobile DOM stays untouched.
+ */
+@media (min-width: 860px) {
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+  .app-header { order: 0; padding-left: 1.5rem; padding-right: 1.5rem; }
+  .tabbar { order: 1; }
+  #main { order: 2; }
+  #modal-root { order: 3; }
+
+  #main {
+    max-width: 760px;
+    padding: 1.5rem 1.5rem 3rem;
+  }
+
+  .tabbar {
+    position: static;
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 0;
+    background: transparent;
+    backdrop-filter: none;
+    border-top: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .tab { flex-direction: row; gap: .45rem; min-height: 48px; padding: 0 .25rem; }
+  .tab-i { font-size: 1rem; }
+
+  /* Keep the gradient backdrop from the base rule — a laptop browser window
+     is often not much taller than the mobile viewport once real content
+     fills it, and without a backdrop the sticky button sits unreadably on
+     top of whatever set row happens to be scrolled underneath it. */
+  .save-bar { bottom: 1.25rem; }
+  .save-bar .btn { max-width: 360px; margin: 0 auto; display: block; }
+
+  .stat-grid { grid-template-columns: repeat(4, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {

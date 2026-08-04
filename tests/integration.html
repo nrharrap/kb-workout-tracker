@@ -192,11 +192,36 @@ try {
     assertEq(target, '4x12 @ 16kg', 'KB Swing, Block 1');
   });
 
+  check('reps pre-fill with the programme\'s target rep count', () => {
+    const first = document.querySelector('input[data-id="kb-swing-2h"][data-field="reps"][data-i="0"]');
+    assertEq(first.value, '12', 'Block 1 KB Swing is 4x12, so set 1 reps should default to 12');
+  });
+
+  check('bodyweight exercises (push-ups, deadbug) have no kg field', () => {
+    assertEq(document.querySelectorAll('input[data-id="push-ups-bars-a"][data-field="kg"]').length, 0);
+    assertEq(document.querySelectorAll('input[data-id="deadbug"][data-field="kg"]').length, 0);
+    assert(document.querySelectorAll('input[data-id="push-ups-bars-a"][data-field="reps"]').length > 0, 'reps field still present');
+  });
+
   // T18 — log every set of the first exercise, then save.
   const setValue = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
   document.querySelectorAll('input[data-id="kb-swing-2h"]').forEach((el) => {
     const f = el.dataset.field;
     setValue(el, f === 'kg' ? 16 : f === 'reps' ? 12 : 7);
+  });
+
+  check('a fully-logged exercise auto-collapses', () => {
+    const card = document.querySelector('[data-exercise-card="kb-swing-2h"]');
+    assert(card.classList.contains('is-collapsed'), 'card should collapse once every set is complete');
+    assert(card.querySelector('.ex-done'), '"Logged" tag should appear');
+    assertEq(card.querySelector('[role="button"]').getAttribute('aria-expanded'), 'false');
+  });
+
+  check('tapping the header re-expands a collapsed exercise', () => {
+    const card = document.querySelector('[data-exercise-card="kb-swing-2h"]');
+    card.querySelector('[data-act="toggle-exercise"]').click();
+    assert(!card.classList.contains('is-collapsed'), 'should reopen on tap');
+    assertEq(card.dataset.userToggled, '1', 'manual toggle recorded, so it will not auto-collapse itself shut again');
   });
 
   document.querySelector('[data-act="save-workout"]').click();

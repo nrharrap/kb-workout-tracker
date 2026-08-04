@@ -295,6 +295,9 @@ function renderToday(state) {
 
   const p = prescriptionFor(state, app.data);
   ensureDraft(state, p);
+  currentPrescriptionMeta = Object.fromEntries(
+    p.exercises.map((ex) => [ex.exerciseId, { sets: ex.sets, tracksLoad: ex.prescribedLoadKg != null }])
+  );
 
   const missed = missedSessionPrompt(state, store.getDismissedOn());
   const reEntry = reEntryDeloadSuggestion(state);
@@ -409,34 +412,55 @@ function golfCard() {
 
 function warmupCard() {
   const ticked = new Set(store.getWarmup());
+  const allDone = WARMUP.every((w) => ticked.has(w.id));
   return `
-    <div class="card">
-      <h3>Warm-up <span class="muted small">~6 min</span></h3>
-      ${WARMUP.map((w) => `
-        <label class="check">
-          <input type="checkbox" data-act="warmup" data-id="${w.id}" ${ticked.has(w.id) ? 'checked' : ''}>
-          <span>${esc(w.label)} <span class="presc">${esc(w.prescription)}</span></span>
-        </label>`).join('')}
+    <div class="card${allDone ? ' is-collapsed' : ''}" data-warmup-card>
+      <div class="ex-head" data-act="toggle-warmup" role="button" tabindex="0" aria-expanded="${allDone ? 'false' : 'true'}">
+        <div class="grow">
+          <h3>Warm-up <span class="muted small">~6 min</span> ${allDone ? '<span class="ex-done">✓ Done</span>' : ''}</h3>
+        </div>
+        <span class="ex-chevron" aria-hidden="true">▾</span>
+      </div>
+      <div class="ex-body">
+        ${WARMUP.map((w) => `
+          <label class="check">
+            <input type="checkbox" data-act="warmup" data-id="${w.id}" ${ticked.has(w.id) ? 'checked' : ''}>
+            <span>${esc(w.label)} <span class="presc">${esc(w.prescription)}</span></span>
+          </label>`).join('')}
+      </div>
     </div>`;
 }
 
 function exerciseCard(ex) {
   const logged = app.draft.exercises[ex.exerciseId] || { sets: [], note: '' };
   const capped = app.draft.golfTomorrow;
+  // Bodyweight and band exercises (push-ups, deadbug, Pallof press) carry no
+  // prescribed kg — the programme cell's loadKg is null for these — so the
+  // load field is dropped rather than shown as an always-empty distraction.
+  const tracksLoad = ex.prescribedLoadKg != null;
+  // AMRAP sets ("3xAMRAP-2") have no fixed target, so only pre-fill reps when
+  // the programme gives an actual number — including distance-based sets
+  // like the rack carry's "30m", which share the reps field under a
+  // different label.
+  const suggestedReps = typeof ex.reps === 'number' ? ex.reps : null;
 
+  let allComplete = true;
   const rows = Array.from({ length: ex.sets }, (_, i) => {
     const set = logged.sets[i] || {};
     const kg = set.kg ?? (ex.suggestedLoadKg ?? '');
+    const reps = set.reps ?? (suggestedReps ?? '');
+    if (set.reps == null || set.rpe == null || (tracksLoad && set.kg == null)) allComplete = false;
     return setBlock({
       label: `Set ${i + 1}${ex.perSide ? ' · each side' : ''}`,
       showFieldLabels: i === 0,
       exId: ex.exerciseId,
       index: i,
       kg,
-      reps: set.reps ?? '',
+      reps,
       rpe: set.rpe ?? '',
       repsLabel: ex.unit === 'm' ? 'Metres' : 'Reps',
       capped,
+      tracksLoad,
     });
   }).join('');
 
@@ -446,33 +470,40 @@ function exerciseCard(ex) {
       ? `<div class="ex-adjust">Pre-filled ${ex.suggestedLoadKg}kg — your override for this cycle.</div>`
       : '';
 
+  // Starts collapsed if it's already fully logged (e.g. reopening the app
+  // mid-workout with this one already done) — see checkAutoCollapse() for
+  // the live version that fires as you finish typing the last value.
   return `
-    <div class="card">
-      <div class="ex-head">
+    <div class="card${allComplete ? ' is-collapsed' : ''}" data-exercise-card="${ex.exerciseId}">
+      <div class="ex-head" data-act="toggle-exercise" role="button" tabindex="0" aria-expanded="${allComplete ? 'false' : 'true'}">
         <div class="grow">
           <div class="ex-name">${esc(ex.name)}</div>
           <span class="ex-target">${esc(ex.target)}</span>
+          ${allComplete ? '<span class="ex-done">✓ Logged</span>' : ''}
         </div>
+        <span class="ex-chevron" aria-hidden="true">▾</span>
       </div>
-      ${ex.setsAdjustedFrom ? `<div class="ex-adjust">Reduced to ${ex.sets} sets this week (normally ${ex.setsAdjustedFrom}) — same load.</div>` : ''}
-      ${loadHint}
-      <div class="ex-note">${esc(ex.note)}</div>
-      ${rows}
-      <div class="field" style="margin-top:.7rem">
-        <label for="note-${ex.exerciseId}">Note</label>
-        <textarea id="note-${ex.exerciseId}" data-act="ex-note" data-id="${ex.exerciseId}" rows="1"
-          placeholder="How did it feel?">${esc(logged.note || '')}</textarea>
+      <div class="ex-body">
+        ${ex.setsAdjustedFrom ? `<div class="ex-adjust">Reduced to ${ex.sets} sets this week (normally ${ex.setsAdjustedFrom}) — same load.</div>` : ''}
+        ${loadHint}
+        <div class="ex-note">${esc(ex.note)}</div>
+        ${rows}
+        <div class="field" style="margin-top:.7rem">
+          <label for="note-${ex.exerciseId}">Note</label>
+          <textarea id="note-${ex.exerciseId}" data-act="ex-note" data-id="${ex.exerciseId}" rows="1"
+            placeholder="How did it feel?">${esc(logged.note || '')}</textarea>
+        </div>
       </div>
     </div>`;
 }
 
-/** One set: its number on its own line, then the three fields at full width. */
-function setBlock({ label, showFieldLabels, exId, index, kg, reps, rpe, repsLabel = 'Reps', capped = false }) {
+/** One set: its number on its own line, then the fields at full width. */
+function setBlock({ label, showFieldLabels, exId, index, kg, reps, rpe, repsLabel = 'Reps', capped = false, tracksLoad = true }) {
   return `
     <div class="set-block">
       <div class="set-label">${esc(label)}</div>
-      <div class="set-fields">
-        ${stepper('kg', exId, index, kg, 'Kg', 0.5, false, showFieldLabels)}
+      <div class="set-fields${tracksLoad ? '' : ' set-fields-2col'}">
+        ${tracksLoad ? stepper('kg', exId, index, kg, 'Kg', 0.5, false, showFieldLabels) : ''}
         ${stepper('reps', exId, index, reps, repsLabel, 1, false, showFieldLabels)}
         ${stepper('rpe', exId, index, rpe, 'RPE', 1, capped, showFieldLabels)}
       </div>
@@ -505,11 +536,74 @@ function stepper(field, exId, index, value, label, step, capped = false, showLab
 function notesCard() {
   return `
     <div class="card">
-      <h3 class="muted small">Progression rules</h3>
+      <h3 class="muted small">RPE — how hard did that set feel?</h3>
+      <p class="muted small">
+        1–10. 10 means you couldn't have done another rep; a solid working set with
+        "2 reps in reserve" is roughly RPE 8. Log it honestly — it's what the progression
+        rule below reads to decide whether to add load, and it's what the golf-day
+        effort cap limits you to.
+      </p>
+      <h3 class="muted small" style="margin-top:.9rem">Progression rules</h3>
       <ul class="muted small" style="padding-left:1.1rem;margin:.3rem 0 0">
         ${PROGRESSION_RULES.map((r) => `<li style="margin-bottom:.3rem">${esc(r)}</li>`).join('')}
       </ul>
     </div>`;
+}
+
+// --- auto-collapse on completion ---------------------------------------------
+//
+// Once every set of an exercise has its required fields, the card collapses
+// so the next thing to do is what's on screen — PRD 4.2's "minimal scrolling
+// per exercise" applies just as much once you're five exercises deep as it
+// does to the first one. A tap on the header always reopens it, and once a
+// card has been toggled by hand it stops auto-collapsing/expanding itself —
+// manual control wins over the automatic behaviour from that point on. The
+// override is stored on the card's own DOM node (data-userToggled), so it
+// resets naturally whenever the view re-renders (new session, tab switch).
+//
+// This runs off targeted DOM edits rather than a full render() because
+// render() rebuilds every card's innerHTML — doing that on every keystroke
+// would drop focus out of the input the user is still typing into.
+
+let currentPrescriptionMeta = {};
+
+function isExerciseComplete(exId) {
+  const meta = currentPrescriptionMeta[exId];
+  const entry = app.draft?.exercises?.[exId];
+  if (!meta || !entry) return false;
+  for (let i = 0; i < meta.sets; i++) {
+    const s = entry.sets[i];
+    if (!s || s.reps == null || s.rpe == null) return false;
+    if (meta.tracksLoad && s.kg == null) return false;
+  }
+  return true;
+}
+
+function checkAutoCollapse(exId) {
+  const card = document.querySelector(`[data-exercise-card="${exId}"]`);
+  if (!card) return;
+  applyCollapseState(card, isExerciseComplete(exId), '.ex-target', 'afterend');
+}
+
+function checkWarmupAutoCollapse() {
+  const card = document.querySelector('[data-warmup-card]');
+  if (!card) return;
+  const ticked = new Set(store.getWarmup());
+  applyCollapseState(card, WARMUP.every((w) => ticked.has(w.id)), 'h3', 'beforeend');
+}
+
+function applyCollapseState(card, complete, doneTagAnchorSelector, position) {
+  const doneTag = card.querySelector('.ex-done');
+  if (complete && !doneTag) {
+    card.querySelector(doneTagAnchorSelector)?.insertAdjacentHTML(position, ' <span class="ex-done">✓ Logged</span>');
+  } else if (!complete && doneTag) {
+    doneTag.remove();
+  }
+
+  if (card.dataset.userToggled) return; // manual control, once taken, sticks
+
+  card.classList.toggle('is-collapsed', complete);
+  card.querySelector('[role="button"]')?.setAttribute('aria-expanded', String(!complete));
 }
 
 // --- draft ------------------------------------------------------------------
@@ -850,6 +944,8 @@ function editModal(session) {
       <p class="muted small">Cycle ${session.cycleNumber}, week ${session.weekInCycle}</p>
       ${session.exercises.map((entry) => {
         const ex = findExercise(entry.exerciseId);
+        const block = blockForWeek(session.weekInCycle);
+        const tracksLoad = ex ? ex.blocks[block]?.loadKg != null : true;
         return `
           <div style="margin-top:.9rem">
             <strong>${esc(ex ? ex.name : entry.exerciseId)}</strong>
@@ -861,6 +957,7 @@ function editModal(session) {
               kg: s.kg ?? '',
               reps: s.reps ?? '',
               rpe: s.rpe ?? '',
+              tracksLoad,
             })).join('')}
           </div>`;
       }).join('')}
@@ -988,7 +1085,27 @@ document.addEventListener('click', async (e) => {
     case 'reload':
       location.reload();
       break;
+
+    case 'toggle-exercise':
+    case 'toggle-warmup': {
+      const card = t.closest('.card');
+      if (!card) break;
+      card.dataset.userToggled = '1'; // manual control from here on — see checkAutoCollapse
+      const collapsed = card.classList.toggle('is-collapsed');
+      card.querySelector('[role="button"]')?.setAttribute('aria-expanded', String(!collapsed));
+      break;
+    }
   }
+});
+
+// Enter/Space activates the collapse toggle, since it's a div with
+// role="button" rather than a real <button> (it wraps multi-line content).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const t = e.target.closest('[data-act="toggle-exercise"], [data-act="toggle-warmup"]');
+  if (!t) return;
+  e.preventDefault();
+  t.click();
 });
 
 document.addEventListener('input', (e) => {
@@ -1003,6 +1120,7 @@ document.addEventListener('input', (e) => {
       else set[t.dataset.field] = Number(t.value);
     } else {
       updateDraftSet(t.dataset.id, Number(t.dataset.i), t.dataset.field, t.value);
+      checkAutoCollapse(t.dataset.id);
     }
   }
 
@@ -1030,6 +1148,7 @@ document.addEventListener('change', (e) => {
       const set = new Set(store.getWarmup());
       t.checked ? set.add(t.dataset.id) : set.delete(t.dataset.id);
       store.setWarmup([...set]);
+      checkWarmupAutoCollapse();
       break;
     }
     case 'hist-filter':
