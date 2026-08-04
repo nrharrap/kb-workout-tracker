@@ -163,6 +163,18 @@ function setSync(state, note = null) {
 function renderBadge() {
   const badge = document.getElementById('sync-badge');
   const unsynced = store.hasUnsynced();
+
+  // Signed-out is a state of its own, not a flavour of "idle" — otherwise the
+  // badge reads "Ready" while there is no way to actually save anything,
+  // which is exactly what happens ~weekly per the OAuth testing-mode expiry
+  // (PRD 8.2). The badge is the only *reliable* re-auth affordance (every
+  // view is reachable read-only while signed out), so it needs to say so.
+  if (!app.signedIn) {
+    badge.textContent = 'Sign in';
+    badge.dataset.state = 'offline';
+    return;
+  }
+
   const label = {
     idle: unsynced ? 'Not synced' : 'Ready',
     syncing: 'Syncing…',
@@ -303,7 +315,7 @@ function renderToday(state) {
   const reEntry = reEntryDeloadSuggestion(state);
 
   el.innerHTML = [
-    app.readOnly ? banner('warn', 'Signed out', 'Showing your last synced data. Sign in again to log a session.') : '',
+    app.readOnly ? readOnlyBanner() : '',
     state.cycleComplete ? cycleCompleteBanner(state) : '',
     missed ? missedBanner(missed) : '',
     reEntry ? reEntryBanner(reEntry) : '',
@@ -374,6 +386,17 @@ function reEntryBanner(s) {
     ? 'You\'re in Block 1, so there\'s no earlier block to drop to — consider cutting the sets instead for your first session back.'
     : `Consider using Block ${s.suggestedBlock} loads for your first session back.`;
   return banner('warn', `${s.daysOff} days since your last session`, `${what} This is a suggestion only — nothing has been changed.`);
+}
+
+function readOnlyBanner() {
+  return `
+    <div class="banner banner-warn">
+      <h3>Signed out</h3>
+      <p class="small">Showing your last synced data from Drive. This happens roughly weekly — Google expires the sign-in automatically. Sign in again to log a session or pick up changes from another device.</p>
+      <div class="row">
+        <button class="btn btn-sm btn-primary" data-act="sign-in">Sign in with Google</button>
+      </div>
+    </div>`;
 }
 
 function rpeCapBanner() {
@@ -986,6 +1009,8 @@ document.addEventListener('click', async (e) => {
   }
 
   switch (act) {
+    case 'sign-in': await signIn(); break;
+
     case 'start-cycle': {
       const n = Number(t.dataset.n);
       const previous = app.data?.cycles?.find((c) => !c.endedAt);
