@@ -209,6 +209,8 @@ p:last-child { margin-bottom: 0; }
   font-weight: 700;
   color: var(--good);
 }
+.ex-mark-done { margin-top: .7rem; }
+.ex-done-btn.is-done { border-color: var(--good); color: var(--good); }
 .ex-name { font-size: 1rem; font-weight: 700; }
 .ex-target {
   display: inline-block;

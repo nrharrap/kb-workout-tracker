@@ -53,6 +53,7 @@ const app = {
 // become the next instance of the same mistake.
 let currentPrescriptionMeta = {};
 let editing = null;
+let editingOriginalKey = null; // sessionKey(session) as it was before any edits — lets edit-save detect a date change and rename rather than duplicate
 let historyFilter = 'kb-swing-2h';
 
 // ---------------------------------------------------------------------------
@@ -407,6 +408,7 @@ function renderToday(state) {
 }
 
 function todayHeaderCard(state, p) {
+  const backdated = app.draft.date !== toISODate();
   return `
     <div class="card">
       <div class="row-between">
@@ -416,6 +418,11 @@ function todayHeaderCard(state, p) {
         </div>
         <span class="pill pill-accent">Cycle ${state.cycleNumber}</span>
       </div>
+      <div class="field" style="margin-top:.6rem">
+        <label for="draft-date">Date</label>
+        <input id="draft-date" type="date" data-act="draft-date" max="${toISODate()}" value="${app.draft.date}" ${app.readOnly ? 'disabled' : ''}>
+      </div>
+      ${backdated ? '<p class="muted small" style="margin-top:.3rem">Logging for a different day — today\'s prescribed exercises below are unchanged.</p>' : ''}
       <p class="muted small" style="margin-top:.6rem">${esc(p.purpose)}</p>
     </div>`;
 }
@@ -538,12 +545,12 @@ function exerciseCard(ex) {
   // different label.
   const suggestedReps = typeof ex.reps === 'number' ? ex.reps : null;
 
-  let allComplete = true;
+  let fieldsComplete = true;
   const rows = Array.from({ length: ex.sets }, (_, i) => {
     const set = logged.sets[i] || {};
     const kg = set.kg ?? (ex.suggestedLoadKg ?? '');
     const reps = set.reps ?? (suggestedReps ?? '');
-    if (set.reps == null || set.rpe == null || (tracksLoad && set.kg == null)) allComplete = false;
+    if (set.reps == null || set.rpe == null || (tracksLoad && set.kg == null)) fieldsComplete = false;
     return setBlock({
       label: `Set ${i + 1}${ex.perSide ? ' · each side' : ''}`,
       showFieldLabels: i === 0,
@@ -558,22 +565,33 @@ function exerciseCard(ex) {
     });
   }).join('');
 
+  // Fully filled in (fieldsComplete) or manually waved through via the Done
+  // button (logged.done) — either counts as done for collapse/tag purposes.
+  // The button itself only appears in the second case: once every field is
+  // filled there is nothing left for it to override.
+  const manuallyDone = Boolean(logged.done);
+  const done = fieldsComplete || manuallyDone;
+
+  const doneButton = fieldsComplete ? '' : manuallyDone
+    ? `<button type="button" class="btn btn-sm ex-done-btn is-done" data-act="toggle-done" data-id="${ex.exerciseId}">Done ✓ (undo)</button>`
+    : `<button type="button" class="btn btn-sm ex-done-btn" data-act="toggle-done" data-id="${ex.exerciseId}" ${hasAnyDraftData(ex.exerciseId) ? '' : 'disabled'}>Done</button>`;
+
   const loadHint = ex.loadSource === 'carry-forward'
     ? `<div class="ex-adjust">Pre-filled ${ex.suggestedLoadKg}kg — carried from last cycle. Editable.</div>`
     : ex.loadSource === 'override'
       ? `<div class="ex-adjust">Pre-filled ${ex.suggestedLoadKg}kg — your override for this cycle.</div>`
       : '';
 
-  // Starts collapsed if it's already fully logged (e.g. reopening the app
-  // mid-workout with this one already done) — see checkAutoCollapse() for
-  // the live version that fires as you finish typing the last value.
+  // Starts collapsed if it's already done (e.g. reopening the app mid-workout
+  // with this one already logged) — see checkAutoCollapse() for the live
+  // version that fires as you finish typing the last value.
   return `
-    <div class="card${allComplete ? ' is-collapsed' : ''}" data-exercise-card="${ex.exerciseId}">
-      <div class="ex-head" data-act="toggle-exercise" role="button" tabindex="0" aria-expanded="${allComplete ? 'false' : 'true'}">
+    <div class="card${done ? ' is-collapsed' : ''}" data-exercise-card="${ex.exerciseId}">
+      <div class="ex-head" data-act="toggle-exercise" role="button" tabindex="0" aria-expanded="${done ? 'false' : 'true'}">
         <div class="grow">
           <div class="ex-name">${esc(ex.name)}</div>
           <span class="ex-target">${esc(ex.target)}</span>
-          ${allComplete ? '<span class="ex-done">✓ Logged</span>' : ''}
+          ${done ? '<span class="ex-done">✓ Logged</span>' : ''}
         </div>
         <span class="ex-chevron" aria-hidden="true">▾</span>
       </div>
@@ -587,6 +605,7 @@ function exerciseCard(ex) {
           <textarea id="note-${ex.exerciseId}" data-act="ex-note" data-id="${ex.exerciseId}" rows="1"
             placeholder="How did it feel?">${esc(logged.note || '')}</textarea>
         </div>
+        <div class="ex-mark-done">${doneButton}</div>
       </div>
     </div>`;
 }
@@ -673,10 +692,30 @@ function isExerciseComplete(exId) {
   return true;
 }
 
+/** Fields-complete OR waved through by the Done button — see exerciseCard's identical `done`. */
+function isExerciseDone(exId) {
+  return isExerciseComplete(exId) || Boolean(app.draft?.exercises?.[exId]?.done);
+}
+
+/** Anything at all entered for this exercise — the Done button needs at least one value to "pull through". */
+function hasAnyDraftData(exId) {
+  const entry = app.draft?.exercises?.[exId];
+  if (!entry) return false;
+  if (entry.note && entry.note.trim()) return true;
+  return entry.sets.some((s) => s && (s.kg != null || s.reps != null || s.rpe != null));
+}
+
 function checkAutoCollapse(exId) {
   const card = document.querySelector(`[data-exercise-card="${exId}"]`);
   if (!card) return;
-  applyCollapseState(card, isExerciseComplete(exId), '.ex-target', 'afterend');
+  applyCollapseState(card, isExerciseDone(exId), '.ex-target', 'afterend');
+
+  // The Done button's enabled state depends on hasAnyDraftData, which changes
+  // on every keystroke — but exerciseCard() itself only reruns on a full
+  // render(), so it has to be kept in sync here too rather than going stale
+  // (disabled forever) the moment you start typing.
+  const btn = card.querySelector('[data-act="toggle-done"]');
+  if (btn && !btn.classList.contains('is-done')) btn.disabled = !hasAnyDraftData(exId);
 }
 
 function checkWarmupAutoCollapse() {
@@ -764,6 +803,12 @@ async function saveWorkout() {
     loggedAt: now,
     updatedAt: now,
   };
+
+  const key = sessionKey(session);
+  const collision = app.data.sessions.some((s) => sessionKey(s) === key);
+  if (collision && !confirm(`A session for Day ${session.dayType} on ${fmtDate(session.date)} is already logged in cycle ${session.cycleNumber}. Saving will overwrite it. Continue?`)) {
+    return;
+  }
 
   await commit(ops.upsertSession(session));
 
@@ -1036,7 +1081,11 @@ function editModal(session) {
   const day = getDay(session.dayType);
   return `
     <div class="modal-backdrop"><div class="modal">
-      <h2>Edit — Day ${session.dayType}, ${fmtDate(session.date)}</h2>
+      <h2>Edit — Day ${session.dayType}</h2>
+      <div class="field" style="margin:.6rem 0">
+        <label for="edit-date">Date</label>
+        <input id="edit-date" type="date" data-act="edit-date" max="${toISODate()}" value="${session.date}">
+      </div>
       <p class="muted small">Cycle ${session.cycleNumber}, week ${session.weekInCycle}</p>
       ${session.exercises.map((entry) => {
         const ex = findExercise(entry.exerciseId);
@@ -1135,17 +1184,35 @@ document.addEventListener('click', async (e) => {
 
     case 'edit-session':
       editing = structuredClone(app.data.sessions.find((s) => sessionKey(s) === t.dataset.key));
+      editingOriginalKey = t.dataset.key;
       renderModals();
       break;
 
     case 'edit-cancel':
       editing = null;
+      editingOriginalKey = null;
       renderModals();
       break;
 
     case 'edit-save': {
       const updated = { ...editing, updatedAt: new Date().toISOString() };
+      const newKey = sessionKey(updated);
+      const renamed = newKey !== editingOriginalKey;
+
+      // The date field changed, which changes the session's merge identity
+      // (cycle:date:dayType) — a plain upsert would leave the original entry
+      // behind as a duplicate instead of moving it.
+      if (renamed) {
+        const collision = app.data.sessions.some((s) => sessionKey(s) === newKey);
+        if (collision && !confirm(`A session for Day ${updated.dayType} on ${fmtDate(updated.date)} already exists. Overwrite it?`)) {
+          break;
+        }
+      }
+
+      const oldKey = editingOriginalKey;
       editing = null;
+      editingOriginalKey = null;
+      if (renamed) await commit(ops.deleteSession(oldKey, updated.updatedAt));
       await commit(ops.upsertSession(updated));
       break;
     }
@@ -1198,6 +1265,14 @@ document.addEventListener('click', async (e) => {
       card.querySelector('[role="button"]')?.setAttribute('aria-expanded', String(!collapsed));
       break;
     }
+
+    case 'toggle-done': {
+      const entry = (app.draft.exercises[t.dataset.id] ||= { sets: [], note: '' });
+      entry.done = !entry.done;
+      store.setDraft(app.draft);
+      render(); // a discrete click, not a keystroke — no focus to preserve
+      break;
+    }
   }
 });
 
@@ -1230,6 +1305,7 @@ document.addEventListener('input', (e) => {
   if (t.dataset.act === 'ex-note') {
     (app.draft.exercises[t.dataset.id] ||= { sets: [], note: '' }).note = t.value;
     store.setDraft(app.draft);
+    checkAutoCollapse(t.dataset.id); // a note alone can also unlock the Done button
   }
 });
 
@@ -1238,6 +1314,14 @@ document.addEventListener('change', (e) => {
   if (!t) return;
 
   switch (t.dataset.act) {
+    case 'draft-date':
+      app.draft.date = t.value;
+      store.setDraft(app.draft);
+      render(); // surfaces or clears the backdated hint
+      break;
+    case 'edit-date':
+      editing.date = t.value;
+      break;
     case 'golf-tomorrow':
       app.draft.golfTomorrow = t.checked;
       store.setDraft(app.draft);
