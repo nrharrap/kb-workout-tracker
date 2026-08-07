@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kb-workout-tracker — loadRemote 404 recovery</title>
+<link rel="stylesheet" href="../css/styles.css">
+<style>
+  #report { position: fixed; inset: 0; z-index: 9999; overflow: auto; padding: 1.2rem;
+            background: #12141a; color: #e6e8ee; font: 14px/1.6 ui-monospace, Menlo, monospace; }
+  #report li { list-style: none; border-bottom: 1px solid #23262f; padding: .3rem 0; }
+  .pass::before { content: "PASS  "; color: #7ee2a0; }
+  .fail::before { content: "FAIL  "; color: #ff6b6b; }
+  pre.err { color: #ffb4b4; margin: .3rem 0 .4rem 3.5rem; white-space: pre-wrap; }
+  #summary { padding: .7rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-weight: 700; }
+  .ok { background: #16351f; color: #7ee2a0; } .bad { background: #3a1a1e; color: #ff9d9d; }
+</style>
+</head>
+<body>
+<div id="report"><div id="summary">Running…</div><ul id="rows"></ul></div>
+
+<script>
+(function () {
+  const bust = Date.now();
+  const files = ['app.js', 'github.js', 'merge.js', 'model.js', 'programme.js', 'schema.js', 'store.js', 'sync.js'];
+  const imports = {};
+  for (const f of files) {
+    const abs = new URL(`../js/${f}`, location.href).href;
+    imports[abs] = `${abs}?t=${bust}`;
+  }
+  const s = document.createElement('script');
+  s.type = 'importmap';
+  s.textContent = JSON.stringify({ imports });
+  document.currentScript.after(s);
+})();
+</script>
+<script type="module">
+/**
+ * Regression test for a real bug reported in production: the cached
+ * `kbwt.fileId` pointed at a gist that no longer existed (deleted, or left
+ * over from an earlier token/account on the same device) — GitHub correctly
+ * returned 404 for it, but loadRemote()'s catch-all treated *any*
+ * non-401/403/SchemaTooNew error as "offline". The console showed the real
+ * 404s plainly; the UI told Nick "Offline — queued", which sent
+ * troubleshooting toward network/connectivity for something that had
+ * nothing to do with the network.
+ *
+ * The fix: a 404 on the cached fileId now clears it and re-runs
+ * findOrCreateFile(), the same recovery a device that had never connected
+ * before would go through — self-healing rather than a dead end needing a
+ * manual fix.
+ */
+
+const results = [];
+const check = (name, fn) => { try { fn(); results.push({ name, passed: true }); }
+                              catch (e) { results.push({ name, passed: false, error: e.message }); } };
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+function assertEq(a, b, msg) {
+  if (a !== b) throw new Error(`${msg}\n    expected: ${JSON.stringify(b)}\n    actual:   ${JSON.stringify(a)}`);
+}
+const waitFor = async (fn, label, timeout = 4000) => {
+  const start = Date.now();
+  for (;;) {
+    try { const v = fn(); if (v) return v; } catch {}
+    if (Date.now() - start > timeout) throw new Error(`timed out waiting for: ${label}`);
+    await new Promise((r) => setTimeout(r, 30));
+  }
+};
+
+for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
+for (const key of await caches.keys()) await caches.delete(key);
+navigator.serviceWorker.register = () => Promise.reject(new Error('service worker disabled for this test run'));
+
+// --- fake GitHub API ----------------------------------------------------
+//
+// Deliberately does NOT contain a gist matching the stale ID this test
+// seeds into localStorage — that's the "deleted/stale" condition itself.
+
+const DATA_FILE_NAME = 'kb-workout-tracker-data.json';
+const FAKE_TOKEN = 'fake-pat-token';
+const STALE_FILE_ID = 'gist-that-no-longer-exists';
+const github = { gists: new Map(), nextId: 1, rev: 0 };
+
+function jsonResponse(body, status = 200, headers = {}) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+}
+function bumpRevision(gist) {
+  gist.updated_at = new Date().toISOString();
+  gist.history.unshift({ version: `sha-${++github.rev}`, committed_at: gist.updated_at });
+}
+
+const realFetch = window.fetch.bind(window);
+window.fetch = async (input, init = {}) => {
+  const url = typeof input === 'string' ? input : input.url;
+  if (!/api\.github\.com/.test(url)) return realFetch(input, init);
+
+  const u = new URL(url);
+  const method = (init.method || 'GET').toUpperCase();
+  const auth = (init.headers || {}).Authorization || '';
+  const token = auth.replace(/^Bearer\s+/, '');
+  if (token !== FAKE_TOKEN) return jsonResponse({ message: 'Bad credentials' }, 401);
+
+  if (u.pathname === '/gists' && method === 'GET') {
+    return jsonResponse([...github.gists.values()].map((g) => ({ id: g.id, created_at: g.created_at, files: g.files })));
+  }
+  if (u.pathname === '/gists' && method === 'POST') {
+    const body = JSON.parse(init.body);
+    const id = `gist-${github.nextId++}`;
+    const gist = { id, created_at: new Date().toISOString(), files: {}, history: [] };
+    for (const [name, f] of Object.entries(body.files)) gist.files[name] = { content: f.content, truncated: false };
+    bumpRevision(gist);
+    github.gists.set(id, gist);
+    return jsonResponse({ id });
+  }
+  const single = u.pathname.match(/^\/gists\/([^/]+)$/);
+  if (single && method === 'GET') {
+    // The stale ID (and only the stale ID) 404s, exactly like a deleted gist.
+    const g = github.gists.get(single[1]);
+    return g ? jsonResponse(g) : jsonResponse({ message: 'Not Found' }, 404);
+  }
+  if (single && method === 'PATCH') {
+    const g = github.gists.get(single[1]);
+    const body = JSON.parse(init.body);
+    Object.assign(g.files, body.files);
+    bumpRevision(g);
+    return jsonResponse(g);
+  }
+  return jsonResponse({ message: `unhandled ${method} ${u.pathname}` }, 500);
+};
+
+// --- simulate a reload with a stale, now-deleted fileId cached ----------
+
+localStorage.clear();
+localStorage.setItem('kbwt.authToken', JSON.stringify(FAKE_TOKEN));
+localStorage.setItem('kbwt.authUsername', JSON.stringify('nrharrap'));
+localStorage.setItem('kbwt.fileId', JSON.stringify(STALE_FILE_ID)); // <-- the stale reference
+const seedData = { schemaVersion: 2, cycles: [], sessions: [], skips: [], retests: [], deleted: [] };
+localStorage.setItem('kbwt.snapshot', JSON.stringify(seedData));
+
+const html = await (await fetch('../index.html', { cache: 'no-store' })).text();
+const doc = new DOMParser().parseFromString(html, 'text/html');
+const report = document.getElementById('report');
+document.body.innerHTML = doc.body.innerHTML;
+document.body.appendChild(report);
+
+await import('../js/app.js');
+
+try {
+  await waitFor(
+    () => document.getElementById('sync-badge').dataset.state !== 'idle',
+    'boot to settle past its initial state'
+  );
+
+  check('a stale fileId does not get stuck showing "offline" — it is not a connectivity problem', () => {
+    const badge = document.getElementById('sync-badge');
+    assert(badge.dataset.state !== 'offline', `badge incorrectly shows offline; text was "${badge.textContent}"`);
+  });
+
+  check('the app recovers to a working, synced state', () => {
+    const badge = document.getElementById('sync-badge');
+    assertEq(badge.dataset.state, 'synced', `badge state (text: "${badge.textContent}")`);
+  });
+
+  check('a fresh gist was created and the stale ID was replaced, not reused', () => {
+    const newFileId = JSON.parse(localStorage.getItem('kbwt.fileId'));
+    assert(newFileId !== STALE_FILE_ID, 'the stale ID should have been discarded');
+    assert(github.gists.has(newFileId), 'the new ID should point at a gist that actually exists');
+    assertEq(github.gists.size, 1, 'exactly one gist exists — no orphaned duplicate left behind');
+  });
+
+  // And the recovered app.fileId actually gets used correctly afterward,
+  // i.e. this isn't a one-off render fluke — saving works too.
+  const startBtn = await waitFor(() => document.querySelector('[data-act="start-cycle"]'), 'start-cycle button');
+  startBtn.click();
+  await waitFor(() => document.querySelector('[data-act="save-workout"]'), 'session view');
+
+  const setValue = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+  document.querySelectorAll('input[data-id="kb-swing-2h"]').forEach((el) => {
+    const f = el.dataset.field;
+    setValue(el, f === 'kg' ? 16 : f === 'reps' ? 12 : 7);
+  });
+  document.querySelector('[data-act="save-workout"]').click();
+  await waitFor(() => document.getElementById('sync-badge').dataset.state === 'synced', 'save after recovery');
+
+  check('a save after the recovery actually reaches the (new) gist', () => {
+    const fileId = JSON.parse(localStorage.getItem('kbwt.fileId'));
+    const stored = JSON.parse(github.gists.get(fileId).files[DATA_FILE_NAME].content);
+    assertEq(stored.sessions.length, 1, 'session landed post-recovery');
+  });
+
+} catch (err) {
+  results.push({ name: 'run aborted', passed: false, error: `${err.message}\n${err.stack || ''}` });
+}
+
+const failed = results.filter((r) => !r.passed);
+document.getElementById('rows').innerHTML = results.map((r) =>
+  `<li class="${r.passed ? 'pass' : 'fail'}">${r.name}</li>` +
+  (r.passed ? '' : `<pre class="err">${String(r.error).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>`)
+).join('');
+const s = document.getElementById('summary');
+s.className = failed.length ? 'bad' : 'ok';
+s.textContent = failed.length ? `${failed.length} FAILED of ${results.length}` : `All ${results.length} checks passed`;
+window.__integrationResults = { total: results.length, failed: failed.length, results };
+console.log(`404-RECOVERY: ${results.length - failed.length}/${results.length} passed`);
+failed.forEach((f) => console.error(`FAIL: ${f.name}\n${f.error}`));
+</script>
+</body>
+</html>

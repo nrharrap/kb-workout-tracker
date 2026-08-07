@@ -38,17 +38,22 @@ const app = {
   notes: [],
 };
 
-// Read by exerciseCard()/checkAutoCollapse() (defined much further down, see
-// the "auto-collapse" section). Declared here — before boot() is invoked
-// below, not after, despite the natural instinct to keep it near the code
-// that uses it — because a real bug shipped from getting that backwards: a
-// `let` binding stays in its temporal dead zone until its declaration line
-// actually runs, and boot() calls render() synchronously (before boot()'s
-// own first await), so on any reload where a cycle already exists,
-// renderToday() would reference this while still in TDZ and throw —
-// aborting boot() before it ever reached loadRemote(), on every single
-// return visit.
+// State for renderToday()/renderModals()/renderHistory() (each defined much
+// further down, near the section they belong to). Declared here — before
+// boot() is invoked below, not near the code that reads them, despite the
+// natural instinct — because a real bug shipped from getting that backwards
+// once already: a `let` binding stays in its temporal dead zone until its
+// own declaration line actually runs, and boot() calls render() *and*
+// renderModals() synchronously, before boot()'s own first await. Two
+// separate variables declared after that point (currentPrescriptionMeta,
+// editing) got referenced while still in TDZ and threw — on every single
+// return visit where a cycle already existed, aborting boot() before it
+// ever reached loadRemote(). historyFilter isn't reachable this way today
+// (app.view always starts as 'today'), but lives here too so it can't
+// become the next instance of the same mistake.
 let currentPrescriptionMeta = {};
+let editing = null;
+let historyFilter = 'kb-swing-2h';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -160,10 +165,31 @@ async function loadRemote() {
       store.setFileId(fileId);
     }
 
-    const [meta, content] = await Promise.all([
-      client.getMeta(app.fileId),
-      client.getContent(app.fileId),
-    ]);
+    let meta, content;
+    try {
+      [meta, content] = await Promise.all([
+        client.getMeta(app.fileId),
+        client.getContent(app.fileId),
+      ]);
+    } catch (err) {
+      if (err.status !== 404) throw err;
+      // The cached fileId doesn't resolve to a real gist any more — deleted,
+      // or left over from a different account/token on this device. Rather
+      // than getting stuck (this used to fall through to a plain "offline"
+      // label, which was actively misleading — it isn't a connectivity
+      // problem at all), forget it and let findOrCreateFile() locate or
+      // create a fresh one, the same as it would on a device that has never
+      // connected before.
+      app.fileId = null;
+      store.setFileId(null);
+      const { fileId } = await client.findOrCreateFile();
+      app.fileId = fileId;
+      store.setFileId(fileId);
+      [meta, content] = await Promise.all([
+        client.getMeta(app.fileId),
+        client.getContent(app.fileId),
+      ]);
+    }
 
     const { data, migrated, from } = migrate(content ?? emptyData());
     app.data = data;
@@ -750,8 +776,10 @@ async function saveWorkout() {
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
-
-let historyFilter = 'kb-swing-2h';
+// (historyFilter is declared near the top of the file, alongside app — not
+// because renderHistory() is ever reached during boot()'s synchronous chain
+// today [app.view starts as 'today'], but so it can never become the next
+// instance of this bug if that ever changes.)
 
 function renderHistory() {
   const el = document.getElementById('view-history');
@@ -959,8 +987,8 @@ function stat(k, v, sub = '') {
 // ---------------------------------------------------------------------------
 // Modals
 // ---------------------------------------------------------------------------
-
-let editing = null;
+// (editing is declared near the top of the file, alongside app — see that
+// comment for why: renderModals() is reached synchronously from boot().)
 
 function renderModals() {
   const root = document.getElementById('modal-root');
