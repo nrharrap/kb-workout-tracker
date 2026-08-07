@@ -30,16 +30,25 @@
 
   <!-- Sign-in gate (T1, T4) -->
   <section id="view-signin" class="view" hidden>
-    <div class="card centred">
-      <h2>Sign in to continue</h2>
+    <form id="signin-form" class="card centred">
+      <h2>Connect GitHub to continue</h2>
       <p class="muted">
-        Your logged sessions live in a private file in your own Google Drive.
-        This app can only see the one file it creates — nothing else in your Drive.
+        Your logged sessions live in a private (secret) GitHub Gist, in your own account.
+        Paste a Personal Access Token scoped to just <strong>gist</strong> — nothing else on your account.
       </p>
-      <button id="btn-signin" class="btn btn-primary btn-lg" type="button">Sign in with Google</button>
+      <div class="field" style="text-align:left">
+        <label for="signin-token-input">Personal Access Token</label>
+        <input id="signin-token-input" type="password" autocomplete="off" spellcheck="false"
+          placeholder="ghp_…">
+      </div>
+      <button id="btn-connect" class="btn btn-primary btn-lg" type="submit">Connect</button>
+      <button id="btn-signin-cancel" class="btn btn-ghost" type="button" hidden>Not now — back to my data</button>
       <p id="signin-error" class="error" hidden></p>
-      <p id="signin-offline" class="muted small" hidden></p>
-    </div>
+      <p class="muted small" style="margin-top:.8rem">
+        No token yet? <strong>github.com/settings/tokens</strong> → Generate new token (classic) →
+        tick only <strong>gist</strong> → Generate → copy the token here.
+      </p>
+    </form>
   </section>
 
   <!-- Today / session -->

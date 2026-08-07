@@ -1,15 +1,18 @@
 /**
  * The save flow (PRD 3.2) — read-check-write with exactly one merge retry.
  *
- * This module holds no Drive code. It talks to a `client` interface:
+ * This module holds no backend-specific code. It talks to a `client`
+ * interface:
  *
  *   getMeta(fileId)    -> { version, modifiedTime }
  *   getContent(fileId) -> parsed JSON
  *   upload(fileId, d)  -> { version, modifiedTime }
  *
- * drive.js supplies the real one; the tests supply a fake. That split is what
- * makes T8 (two devices merge), T9 (second conflict aborts) and T10 (crash
- * mid-save) testable without staging them on two physical devices.
+ * github.js supplies the real one (backed by a Gist); the tests supply a
+ * fake. That split is what makes T8 (two devices merge), T9 (second conflict
+ * aborts) and T10 (crash mid-save) testable without staging them on two
+ * physical devices — and it's also what let the storage backend itself move
+ * from Google Drive to GitHub Gists without a single line changing here.
  */
 
 import { merge } from './merge.js';
@@ -25,10 +28,10 @@ export const OUTCOME = {
 };
 
 /**
- * Drive's `version` is a monotonically increasing integer, which is a sounder
- * change token than comparing `modifiedTime` strings — no clock skew, no
- * second-level truncation. modifiedTime is kept only as a fallback for the
- * rare response that omits version.
+ * A content-addressed or monotonically increasing `version` (a Gist revision
+ * SHA, for the current backend) is a sounder change token than comparing
+ * `modifiedTime` strings — no clock skew, no second-level truncation.
+ * modifiedTime is kept only as a fallback for a response that omits version.
  */
 export function versionToken(meta) {
   if (!meta) return null;
@@ -40,7 +43,7 @@ function unchanged(meta, token) {
 }
 
 /**
- * Push queued changes to Drive.
+ * Push queued changes to the remote store.
  *
  * `baseToken` is the version captured when the local snapshot was loaded —
  * i.e. what this device believes the file looked like when the session began.
@@ -145,7 +148,7 @@ export async function resolveConflict({ client, fileId, choice, remote, localDat
   const fresh = await client.getMeta(fileId);
 
   if (choice === 'keep-remote') {
-    // Discard the local queue; the Drive copy stands.
+    // Discard the local queue; the remote copy stands.
     return { outcome: OUTCOME.SYNCED, data: remote, token: versionToken(fresh), discarded: pendingOps };
   }
 

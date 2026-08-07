@@ -18,10 +18,10 @@ import { merge, ops, sessionKey, describeOps } from './merge.js';
 import { migrate, emptyData } from './schema.js';
 import { pushChanges, resolveConflict, OUTCOME, versionToken } from './sync.js';
 import { createStore } from './store.js';
-import { DriveAuth, createDriveClient } from './drive.js';
+import { GitHubAuth, createGistClient } from './github.js';
 
 const store = createStore(window.localStorage);
-const auth = new DriveAuth();
+const auth = new GitHubAuth();
 let client = null;
 
 const app = {
@@ -33,6 +33,7 @@ const app = {
   syncNote: null,
   draft: null,
   readOnly: false,
+  showSigninForm: false,
   conflict: null,
   notes: [],
 };
@@ -56,48 +57,36 @@ async function boot() {
   app.fileId = store.getFileId();
   app.draft = store.getDraft();
 
+  // A pasted token has no renewal/expiry concept the app can check locally —
+  // it's trusted until an actual API call says otherwise (a 401, handled in
+  // loadRemote()/flushQueue() below), rather than validated up front on
+  // every load just to find out.
+  const savedToken = store.getAuthToken();
+  if (savedToken) {
+    auth.restore(savedToken, store.getAuthUsername());
+    app.signedIn = true;
+  }
+
   bindChrome();
   render();
 
-  // init() also consumes a token from the URL if this load is the browser
-  // returning from signIn()'s redirect (T2/T4).
-  const ready = await auth.init();
-
-  const redirectError = auth.takeRedirectError();
-  if (redirectError) {
-    show('signin-error', `${redirectError.message} — you can try again.`);
-  }
-
-  if (!ready) {
-    setSync('offline', 'Google sign-in unavailable');
-    show('signin-offline', app.data ? 'No connection. Showing your last synced data.' : 'No connection, and nothing cached yet.');
-    render();
-    return;
-  }
-
-  client = createDriveClient(auth);
-
-  if (auth.isSignedIn()) {
-    // Just returned from a successful sign-in redirect.
-    app.signedIn = true;
-    await loadFromDrive();
-  } else {
-    // Silent renewal against an existing Google session; a rejection here
-    // just means "not signed in", which is a normal first-run state, not an
-    // error.
-    try {
-      await auth.requestToken();
-      app.signedIn = true;
-      await loadFromDrive();
-    } catch {
-      app.signedIn = false;
-    }
+  if (app.signedIn) {
+    client = createGistClient(auth);
+    await loadRemote();
   }
   render();
 }
 
 function bindChrome() {
-  document.getElementById('btn-signin').addEventListener('click', signIn);
+  document.getElementById('signin-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    connectWithToken();
+  });
+  document.getElementById('btn-signin-cancel').addEventListener('click', () => {
+    app.showSigninForm = false;
+    hide('signin-error');
+    render();
+  });
   document.getElementById('sync-badge').addEventListener('click', onBadgeClick);
 
   for (const tab of document.querySelectorAll('.tab')) {
@@ -116,16 +105,31 @@ function bindChrome() {
   }
 }
 
-// A full-page redirect to Google and back (drive.js) rather than a popup —
-// popups were silently blocked on desktop regardless of how carefully the
-// call was timed. Nothing after auth.signIn() runs in this page load; the
-// browser navigates away immediately.
-function signIn() {
+async function connectWithToken() {
   hide('signin-error');
-  auth.signIn();
+  const input = document.getElementById('signin-token-input');
+  const btn = document.getElementById('btn-connect');
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  try {
+    const { username } = await auth.connect(input.value);
+    store.setAuth(auth.token, username);
+    input.value = ''; // the secret shouldn't linger in the DOM longer than it has to
+    app.signedIn = true;
+    app.showSigninForm = false;
+    client = createGistClient(auth);
+    await loadRemote();
+  } catch (err) {
+    show('signin-error', err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+  }
+  render();
 }
 
-async function loadFromDrive() {
+async function loadRemote() {
   setSync('syncing');
   try {
     if (!app.fileId) {
@@ -149,12 +153,13 @@ async function loadFromDrive() {
   } catch (err) {
     if (err.status === 401 || err.status === 403) {
       app.signedIn = false;
-      setSync('error', 'Sign-in expired');
+      store.clearAuth();
+      setSync('error', 'Sign in again');
     } else if (err.name === 'SchemaTooNewError') {
       setSync('error', 'Newer data version');
       app.notes = [{ kind: 'schema-too-new', message: err.message }];
     } else {
-      setSync('offline', 'Could not reach Drive');
+      setSync('offline', 'Could not reach GitHub');
     }
   }
   render();
@@ -176,9 +181,9 @@ function renderBadge() {
 
   // Signed-out is a state of its own, not a flavour of "idle" — otherwise the
   // badge reads "Ready" while there is no way to actually save anything,
-  // which is exactly what happens ~weekly per the OAuth testing-mode expiry
-  // (PRD 8.2). The badge is the only *reliable* re-auth affordance (every
-  // view is reachable read-only while signed out), so it needs to say so.
+  // which happens whenever the pasted token expires or gets revoked (PRD
+  // 8.2). The badge is a reliable reconnect affordance from any view, so it
+  // needs to say so.
   if (!app.signedIn) {
     badge.textContent = 'Sign in';
     badge.dataset.state = 'offline';
@@ -202,7 +207,7 @@ function renderBadge() {
   badge.dataset.state = dataState;
 }
 
-/** Apply an op locally, persist it, then attempt the Drive write. */
+/** Apply an op locally, persist it, then attempt the GitHub write. */
 async function commit(op) {
   store.enqueue(op); // queued BEFORE the network call — see store.js (T10)
   const { data, notes } = merge(app.data, [op]);
@@ -270,12 +275,20 @@ async function flushQueue() {
 function render() {
   const gated = !app.signedIn && !app.data;
   app.readOnly = !app.signedIn && Boolean(app.data);
+  // Reconnecting mid-session (readOnly + the banner's "Reconnect" tapped)
+  // shows the same form as the first-run gate, full-screen — a token paste
+  // needs no more room than that, and it keeps one form to maintain instead
+  // of a second inline copy in the banner.
+  const showGate = gated || app.showSigninForm;
 
-  document.getElementById('view-signin').hidden = !gated;
-  document.getElementById('tabbar').hidden = gated;
+  document.getElementById('view-signin').hidden = !showGate;
+  // Only meaningful when there's cached data to go back to — the true
+  // first-run gate has nothing behind it to cancel to.
+  document.getElementById('btn-signin-cancel').hidden = !app.readOnly;
+  document.getElementById('tabbar').hidden = showGate;
 
   for (const name of ['today', 'history', 'retest', 'progress']) {
-    document.getElementById(`view-${name}`).hidden = gated || app.view !== name;
+    document.getElementById(`view-${name}`).hidden = showGate || app.view !== name;
   }
   for (const tab of document.querySelectorAll('.tab')) {
     if (tab.dataset.view === app.view) tab.setAttribute('aria-current', 'page');
@@ -283,7 +296,7 @@ function render() {
   }
 
   renderBadge();
-  if (gated) { document.getElementById('header-sub').textContent = ''; return; }
+  if (showGate) { document.getElementById('header-sub').textContent = ''; return; }
 
   const state = app.data ? deriveState(app.data, toISODate()) : { started: false };
   document.getElementById('header-sub').textContent = state.started
@@ -402,9 +415,9 @@ function readOnlyBanner() {
   return `
     <div class="banner banner-warn">
       <h3>Signed out</h3>
-      <p class="small">Showing your last synced data from Drive. This happens roughly weekly — Google expires the sign-in automatically. Sign in again to log a session or pick up changes from another device.</p>
+      <p class="small">Showing your last synced data. Your token expired, was revoked, or hasn't been entered on this device yet — reconnect to log a session or pick up changes from another device.</p>
       <div class="row">
-        <button class="btn btn-sm btn-primary" data-act="sign-in">Sign in with Google</button>
+        <button class="btn btn-sm btn-primary" data-act="show-signin">Reconnect</button>
       </div>
     </div>`;
 }
@@ -960,12 +973,12 @@ function conflictModal(conflict) {
       <h3 style="margin-top:.8rem">Your unsaved changes</h3>
       <pre>${esc(mine.join('\n') || 'none')}</pre>
 
-      <h3>Most recent in Drive</h3>
+      <h3>Most recent in the Gist</h3>
       <pre>${esc(theirs.join('\n') || 'none')}</pre>
 
-      <button class="btn btn-primary" data-act="conflict" data-choice="retry-merge">Merge mine into the Drive copy</button>
-      <button class="btn" data-act="conflict" data-choice="keep-remote">Keep Drive's copy, discard mine</button>
-      <button class="btn btn-danger" data-act="conflict" data-choice="force-local">Overwrite Drive with mine</button>
+      <button class="btn btn-primary" data-act="conflict" data-choice="retry-merge">Merge mine into that copy</button>
+      <button class="btn" data-act="conflict" data-choice="keep-remote">Keep that copy, discard mine</button>
+      <button class="btn btn-danger" data-act="conflict" data-choice="force-local">Overwrite it with mine</button>
     </div></div>`;
 }
 
@@ -1019,7 +1032,10 @@ document.addEventListener('click', async (e) => {
   }
 
   switch (act) {
-    case 'sign-in': signIn(); break;
+    case 'show-signin':
+      app.showSigninForm = true;
+      render();
+      break;
 
     case 'start-cycle': {
       const n = Number(t.dataset.n);
@@ -1113,6 +1129,7 @@ document.addEventListener('click', async (e) => {
 
     case 'sign-out':
       auth.signOut();
+      store.clearAuth(); // otherwise the token would silently restore itself on next open
       app.signedIn = false;
       render();
       break;
@@ -1194,9 +1211,9 @@ document.addEventListener('change', (e) => {
 });
 
 function onBadgeClick() {
-  if (!app.signedIn) { signIn(); return; }
+  if (!app.signedIn) { app.showSigninForm = true; render(); return; }
   if (store.hasUnsynced()) { flushQueue(); return; }
-  loadFromDrive();
+  loadRemote();
 }
 
 // ---------------------------------------------------------------------------

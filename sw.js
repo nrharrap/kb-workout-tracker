@@ -1,10 +1,13 @@
 /**
  * Service worker (PRD 5, offline behaviour).
  *
- * App shell: cache-first, so the programme and the UI open with no signal.
- * Drive API and Google auth: never cached — a stale token or a stale copy of
- * data.json would be worse than an honest failure, and sync.js already knows
- * how to queue when the network is unavailable.
+ * App shell: network-first with a short timeout, falling back to cache (see
+ * networkFirst() below) — so the programme and the UI open with no signal,
+ * and a fresh deploy is picked up on the next load rather than needing a
+ * second reload to notice the change.
+ * The GitHub API: never cached — a stale response would be worse than an
+ * honest failure, and sync.js already knows how to queue when the network
+ * is unavailable.
  */
 
 const CACHE = 'kbwt-v1';
@@ -21,7 +24,7 @@ const SHELL = [
   './js/schema.js',
   './js/sync.js',
   './js/store.js',
-  './js/drive.js',
+  './js/github.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
@@ -49,12 +52,8 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
-  // Anything Google — auth, Drive — goes straight to the network, always.
-  if (url.hostname.endsWith('googleapis.com') ||
-      url.hostname.endsWith('google.com') ||
-      url.hostname.endsWith('gstatic.com')) {
-    return;
-  }
+  // The GitHub API goes straight to the network, always.
+  if (url.hostname === 'api.github.com') return;
 
   if (url.origin !== self.location.origin) return;
 

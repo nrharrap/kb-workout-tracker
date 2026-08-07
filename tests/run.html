@@ -23,12 +23,21 @@
   <ul id="results"></ul>
 
   <script type="module">
-    import { runAll, testCount } from './harness.js';
-    import './programme.test.js';
-    import './model.test.js';
-    import './merge.test.js';
-    import './sync.test.js';
-    import './drive.test.js';
+    // Cache-busted dynamic imports rather than static ones: a plain, unbusted
+    // `import` of these exact URLs has been observed serving a stale module
+    // body in some environments even with the HTTP cache, Cache Storage and
+    // any service worker all ruled out — a deeper engine-level code cache,
+    // keyed by URL. A query string changes the cache key and sidesteps it.
+    // harness.js itself stays unbusted so every test file's `test()` calls
+    // register into the one shared registry that runAll()/testCount() below
+    // read from.
+    const { runAll, testCount } = await import('./harness.js');
+    const bust = `?t=${Date.now()}`;
+    await import('./programme.test.js' + bust);
+    await import('./model.test.js' + bust);
+    await import('./merge.test.js' + bust);
+    await import('./sync.test.js' + bust);
+    await import('./github.test.js' + bust);
 
     const results = await runAll();
     const failed = results.filter((r) => !r.passed);

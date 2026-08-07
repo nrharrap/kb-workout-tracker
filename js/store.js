@@ -13,12 +13,14 @@
 
 const KEYS = {
   snapshot: 'kbwt.snapshot',
-  token: 'kbwt.token',
+  token: 'kbwt.token', // the sync cursor (gist revision), NOT the auth token below
   fileId: 'kbwt.fileId',
   pending: 'kbwt.pending',
   draft: 'kbwt.draft',
   dismissedOn: 'kbwt.missedPromptDismissedOn',
   warmup: 'kbwt.warmup',
+  authToken: 'kbwt.authToken',
+  authUsername: 'kbwt.authUsername',
 };
 
 export function memoryStorage(seed = {}) {
@@ -55,6 +57,18 @@ export function createStore(storage) {
 
     getFileId: () => read(KEYS.fileId, null),
     setFileId: (id) => write(KEYS.fileId, id),
+
+    // --- GitHub auth (PRD 3.2) — a pasted token, not a renewable session ----
+    getAuthToken: () => read(KEYS.authToken, null),
+    getAuthUsername: () => read(KEYS.authUsername, null),
+    setAuth(token, username) {
+      write(KEYS.authToken, token);
+      write(KEYS.authUsername, username);
+    },
+    clearAuth() {
+      storage.removeItem(KEYS.authToken);
+      storage.removeItem(KEYS.authUsername);
+    },
 
     // --- pending op queue --------------------------------------------------
     getPending: () => read(KEYS.pending, []),

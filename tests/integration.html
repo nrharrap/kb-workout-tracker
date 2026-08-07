@@ -19,16 +19,55 @@
 <body>
 <div id="report"><div id="summary">Running…</div><ul id="rows"></ul></div>
 
+<script>
+// Cache-busting the entry module's own import() call isn't enough: app.js's
+// internal `import './store.js'` resolves independently to the plain,
+// unbusted absolute URL, which can itself be stale in this environment even
+// with the HTTP cache, Cache Storage and any service worker all ruled out —
+// some deeper engine-level code cache, keyed by exact URL. An import map
+// rewrites every local module's resolved (absolute) URL to a uniquely
+// query-stringed one in a single place, so the whole dependency graph gets a
+// consistently fresh cache key regardless of how many levels deep it's
+// imported from. This has to be a classic (non-module) script, and it has to
+// run before any module script in the document — an import map added after
+// module resolution has started throws.
+(function () {
+  const bust = Date.now();
+  const files = ['app.js', 'github.js', 'merge.js', 'model.js', 'programme.js', 'schema.js', 'store.js', 'sync.js'];
+  const imports = {};
+  for (const f of files) {
+    const abs = new URL(`../js/${f}`, location.href).href;
+    imports[abs] = `${abs}?t=${bust}`;
+  }
+  const s = document.createElement('script');
+  s.type = 'importmap';
+  s.textContent = JSON.stringify({ imports });
+  document.currentScript.after(s);
+})();
+</script>
 <script type="module">
 /**
- * End-to-end test of the real UI against a fake Drive and a fake Google
- * sign-in. The headless suite in run.html covers the rules; this covers the
- * wiring between them and the DOM — sign-in gate, file creation, logging a
- * session, the save flow, and the offline queue.
+ * End-to-end test of the real UI against a fake GitHub API. The headless
+ * suite in run.html covers the rules; this covers the wiring between them
+ * and the DOM — sign-in gate, gist creation, logging a session, the save
+ * flow, and the offline queue.
  *
  * The page loads index.html's own markup rather than duplicating it, so this
  * test cannot silently drift from the real document.
  */
+
+// A service worker registered by an earlier index.html load persists for
+// this origin independently of any tab (unlike localStorage) and, scoped to
+// "/", also controls this page. Unregistering it here isn't reliable on its
+// own: browsers throttle how often they re-check a registered worker's
+// script for changes (well over a minute, sometimes 24h), so a fresh
+// register() call — which bindChrome() makes on every boot() — can win the
+// race and keep an old worker (and whatever it has cached) in control
+// regardless. The one fully reliable fix is to stop this run from
+// registering a worker at all.
+for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
+for (const key of await caches.keys()) await caches.delete(key);
+navigator.serviceWorker.register = () => Promise.reject(new Error('service worker disabled for this test run'));
 
 const results = [];
 const check = (name, fn) => { try { fn(); results.push({ name, passed: true }); }
@@ -48,148 +87,110 @@ const waitFor = async (fn, label, timeout = 4000) => {
   }
 };
 
-// --- fake Drive -------------------------------------------------------------
+// --- fake GitHub API ---------------------------------------------------------
 
-const drive = { files: new Map(), nextId: 1, version: 0 };
+const DATA_FILE_NAME = 'kb-workout-tracker-data.json';
+const FAKE_TOKEN = 'fake-pat-token';
+const github = { gists: new Map(), nextId: 1, rev: 0 };
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+function jsonResponse(body, status = 200, headers = {}) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+}
+
+function bumpRevision(gist) {
+  gist.updated_at = new Date().toISOString();
+  gist.history.unshift({ version: `sha-${++github.rev}`, committed_at: gist.updated_at });
 }
 
 const realFetch = window.fetch.bind(window);
 
 window.fetch = async (input, init = {}) => {
   const url = typeof input === 'string' ? input : input.url;
-  if (!/googleapis\.com/.test(url)) return realFetch(input, init);
-
+  if (!/api\.github\.com/.test(url)) return realFetch(input, init);
   if (window.__forceOffline) throw new TypeError('Failed to fetch');
 
   const u = new URL(url);
   const method = (init.method || 'GET').toUpperCase();
+  const auth = (init.headers || {}).Authorization || '';
+  const token = auth.replace(/^Bearer\s+/, '');
 
-  // List
-  if (u.pathname === '/drive/v3/files' && method === 'GET') {
-    const files = [...drive.files.entries()].map(([id, f]) => ({ id, name: f.name, version: f.version, modifiedTime: f.modifiedTime }));
-    return jsonResponse({ files });
+  if (u.pathname === '/user') {
+    if (token !== FAKE_TOKEN) return jsonResponse({ message: 'Bad credentials' }, 401);
+    return jsonResponse({ login: 'nrharrap' }, 200, { 'x-oauth-scopes': 'gist' });
   }
-  // Create (multipart)
-  if (u.pathname === '/upload/drive/v3/files' && method === 'POST') {
-    const id = `file-${drive.nextId++}`;
-    const parts = String(init.body).split('\r\n\r\n');
-    let content = {};
-    try { content = JSON.parse(parts[2].split('\r\n--')[0]); } catch {}
-    drive.files.set(id, { name: 'kb-workout-tracker-data.json', content, version: ++drive.version, modifiedTime: new Date().toISOString() });
+
+  if (token !== FAKE_TOKEN) return jsonResponse({ message: 'Bad credentials' }, 401);
+
+  if (u.pathname === '/gists' && method === 'GET') {
+    return jsonResponse([...github.gists.values()].map((g) => ({ id: g.id, created_at: g.created_at, files: g.files })));
+  }
+
+  if (u.pathname === '/gists' && method === 'POST') {
+    const body = JSON.parse(init.body);
+    const id = `gist-${github.nextId++}`;
+    const gist = { id, created_at: new Date().toISOString(), files: {}, history: [] };
+    for (const [name, f] of Object.entries(body.files)) gist.files[name] = { content: f.content, truncated: false };
+    bumpRevision(gist);
+    github.gists.set(id, gist);
     return jsonResponse({ id });
   }
-  // Meta / content
-  const getMatch = u.pathname.match(/^\/drive\/v3\/files\/([^/]+)$/);
-  if (getMatch && method === 'GET') {
-    const f = drive.files.get(getMatch[1]);
-    if (!f) return jsonResponse({ error: 'not found' }, 404);
-    if (u.searchParams.get('alt') === 'media') {
-      return new Response(JSON.stringify(f.content), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-    return jsonResponse({ version: f.version, modifiedTime: f.modifiedTime });
+
+  const single = u.pathname.match(/^\/gists\/([^/]+)$/);
+  if (single && method === 'GET') {
+    const g = github.gists.get(single[1]);
+    return g ? jsonResponse(g) : jsonResponse({ message: 'Not Found' }, 404);
   }
-  // Update
-  const patchMatch = u.pathname.match(/^\/upload\/drive\/v3\/files\/([^/]+)$/);
-  if (patchMatch && method === 'PATCH') {
-    const f = drive.files.get(patchMatch[1]);
-    f.content = JSON.parse(init.body);
-    f.version = ++drive.version;
-    f.modifiedTime = new Date().toISOString();
-    return jsonResponse({ version: f.version, modifiedTime: f.modifiedTime });
+  if (single && method === 'PATCH') {
+    const g = github.gists.get(single[1]);
+    if (!g) return jsonResponse({ message: 'Not Found' }, 404);
+    const body = JSON.parse(init.body);
+    Object.assign(g.files, body.files);
+    bumpRevision(g);
+    return jsonResponse(g);
   }
-  return jsonResponse({ error: `unhandled ${method} ${u.pathname}` }, 500);
+
+  return jsonResponse({ message: `unhandled ${method} ${u.pathname}` }, 500);
 };
 
-// --- fake Google Identity Services -----------------------------------------
-
-// Silent renewal fails until an interactive sign-in has happened, which is
-// what a first run genuinely looks like.
-window.__hasConsented = false;
-window.__authLog = [];
-
-window.google = {
-  accounts: {
-    oauth2: {
-      initTokenClient(config) {
-        window.__authLog.push('initTokenClient');
-        const client = {
-          callback: config.callback,
-          requestAccessToken({ prompt }) {
-            window.__authLog.push(`request prompt=${JSON.stringify(prompt)}`);
-            setTimeout(() => {
-              if (prompt === '' && !window.__hasConsented) {
-                window.__authLog.push('-> reject (silent, no consent yet)');
-                client.callback({ error: 'interaction_required' });
-              } else {
-                window.__hasConsented = true;
-                window.__authLog.push('-> resolve token');
-                client.callback({ access_token: 'fake-token', expires_in: 3600 });
-              }
-            }, 10);
-          },
-        };
-        return client;
-      },
-      revoke(_t, cb) { window.__hasConsented = false; cb?.(); },
-    },
-  },
-};
-
-// --- simulate arriving already signed in, via a redirect return -------------
+// --- load the real markup, then the real app --------------------------------
 //
-// signIn() (drive.js) is now a full-page redirect to Google and back, not a
-// popup — popups turned out to be silently blockable on desktop browsers
-// regardless of call timing, with no error shown. That means "click the
-// button, get a token back" can no longer be simulated within one continuous
-// script by faking a GIS popup callback: the redirect genuinely leaves the
-// page, and a fresh page load is what picks the token up from the URL. So
-// this seeds a valid redirect return (matching sessionStorage state + URL
-// fragment) *before* importing app.js, simulating the page load that follows
-// Google sending the browser back — the same entry point boot() uses for
-// real. The pure mechanics (building the outbound URL, parsing a returned
-// fragment, a declined consent, a mismatched/forged state) are unit-tested
-// directly in tests/drive.test.js; this covers the DOM wiring on top of
-// that — that boot() correctly turns a consumed token into a loaded session.
-const oauthState = 'integration-test-state';
-sessionStorage.setItem('kbwt.oauthState', oauthState);
-location.hash = `access_token=fake-token&expires_in=3600&state=${oauthState}&token_type=Bearer`;
+// Signing in is now just filling in a token and submitting a form — no
+// popup, no redirect, nothing this harness needs to fake beyond the GitHub
+// API itself above. That's the whole point of the switch away from Google
+// OAuth: this integration test got *simpler* along with the real UX.
 
 localStorage.clear();
 
-const html = await (await fetch('../index.html')).text();
+const html = await (await fetch('../index.html', { cache: 'no-store' })).text();
 const doc = new DOMParser().parseFromString(html, 'text/html');
 const report = document.getElementById('report');
 document.body.innerHTML = doc.body.innerHTML;
 document.body.appendChild(report);
-// The inline module tag from index.html isn't executed by innerHTML; import it.
+// The inline module tag from index.html isn't executed by innerHTML; import
+// it. Plain specifier — the import map above (loaded before this script)
+// transparently rewrites this and every module it imports to a fresh URL.
 await import('../js/app.js');
 
 // --- the run ----------------------------------------------------------------
 
 try {
-  // T1 — checked the instant import() resolves: boot()'s first render() runs
-  // synchronously, before auth.init() — and the redirect-token consumption
-  // inside it — has had any chance to resolve. So the sign-in gate is
-  // reliably still showing at exactly this point, the same as a genuinely
-  // fresh, signed-out load looks.
+  // T1 — first open, no prior sign-in.
   check('T1 — first open shows the sign-in gate', () => {
     assert(!document.getElementById('view-signin').hidden, 'sign-in view should be visible');
     assert(document.getElementById('tabbar').hidden, 'tabs hidden until signed in');
-    assertEq(drive.files.size, 0, 'nothing touched in Drive before sign-in');
+    assertEq(github.gists.size, 0, 'nothing touched on GitHub before sign-in');
   });
 
-  // T2 — the redirect return above completes: the token is consumed, the URL
-  // is cleaned up, and the app proceeds to create data.json.
+  // T2 — paste a token and connect; the gist is created.
+  document.getElementById('signin-token-input').value = FAKE_TOKEN;
+  document.getElementById('btn-connect').click();
   await waitFor(() => document.getElementById('view-signin').hidden, 'signed in');
-  check('T2 — a redirect return consumes the token, cleans the URL, and creates data.json', () => {
-    assertEq(location.hash, '', 'the token does not linger in the address bar or browser history');
-    assertEq(sessionStorage.getItem('kbwt.oauthState'), null, 'one-time use — the CSRF state guard is cleared');
-    assertEq(drive.files.size, 1, 'exactly one data file created');
-    assertEq([...drive.files.values()][0].name, 'kb-workout-tracker-data.json', 'file name');
+
+  check('T2 — connecting a valid token creates the gist and loads the app', () => {
+    assertEq(github.gists.size, 1, 'exactly one gist created');
+    assertEq(Object.keys([...github.gists.values()][0].files)[0], DATA_FILE_NAME, 'file name');
     assert(!document.getElementById('tabbar').hidden, 'tabs now available');
+    assertEq(JSON.parse(localStorage.getItem('kbwt.authToken')), FAKE_TOKEN, 'the token is persisted for next open');
   });
 
   // Start a cycle.
@@ -243,9 +244,9 @@ try {
   document.querySelector('[data-act="save-workout"]').click();
   await waitFor(() => document.getElementById('sync-badge').dataset.state === 'synced', 'save confirmed');
 
-  const stored = () => [...drive.files.values()][0].content;
+  const stored = () => JSON.parse([...github.gists.values()][0].files[DATA_FILE_NAME].content);
 
-  check('T6 / T18 — the saved session lands in Drive with the values entered', () => {
+  check('T6 / T18 — the saved session lands in the gist with the values entered', () => {
     const d = stored();
     assertEq(d.sessions.length, 1, 'one session written');
     const s = d.sessions[0];
@@ -280,7 +281,7 @@ try {
 
   check('T30 — saving offline queues without error and shows "not yet synced"', () => {
     assertEq(JSON.parse(localStorage.getItem('kbwt.pending')).length, 1, 'one op queued');
-    assertEq(stored().sessions.length, 1, 'Drive untouched while offline');
+    assertEq(stored().sessions.length, 1, 'GitHub untouched while offline');
     const badge = document.getElementById('sync-badge');
     assertEq(badge.dataset.state, 'offline', 'badge shows offline');
     assert(/queued/i.test(badge.textContent), `badge should say queued, got "${badge.textContent}"`);
@@ -297,7 +298,7 @@ try {
   await waitFor(() => document.getElementById('sync-badge').dataset.state === 'synced', 'reconnect flush');
 
   check('T31 — the queued save completes automatically on reconnect', () => {
-    assertEq(stored().sessions.length, 2, 'both sessions now in Drive');
+    assertEq(stored().sessions.length, 2, 'both sessions now in the gist');
     assertEq(JSON.parse(localStorage.getItem('kbwt.pending')).length, 0, 'queue drained');
     const b = stored().sessions.find((s) => s.dayType === 'B');
     assertEq(b.exercises.find((e) => e.exerciseId === 'goblet-squat-rotation').sets[0].kg, 12, 'offline values intact');
@@ -313,6 +314,36 @@ try {
   check('T11 — deleting a past entry syncs and leaves a tombstone', () => {
     assertEq(stored().sessions.length, 1, 'one session removed');
     assertEq(stored().deleted.length, 1, 'tombstone written so a stale device cannot resurrect it');
+  });
+
+  // Sign out, then reconnect via the read-only banner's path — the other
+  // entry point into the same sign-in form (PRD: the badge/banner "Reconnect"
+  // affordance, not just the first-run gate).
+  document.querySelector('.tab[data-view="progress"]').click();
+  const signOutBtn = await waitFor(() => document.querySelector('[data-act="sign-out"]'), 'sign-out button');
+  signOutBtn.click();
+
+  check('signing out clears the persisted token and shows read-only data', () => {
+    assertEq(localStorage.getItem('kbwt.authToken'), null, 'token forgotten, not just the in-memory session');
+    assertEq(document.getElementById('view-signin').hidden, true, 'still browsing read-only, not forced back to the gate');
+    assert(document.getElementById('sync-badge').textContent === 'Sign in', 'badge prompts reconnection');
+  });
+
+  document.querySelector('.tab[data-view="today"]').click();
+  const reconnectBtn = await waitFor(() => document.querySelector('[data-act="show-signin"]'), 'reconnect banner button');
+  reconnectBtn.click();
+
+  check('tapping Reconnect on the read-only banner reopens the same sign-in form', () => {
+    assertEq(document.getElementById('view-signin').hidden, false);
+    assertEq(document.getElementById('btn-signin-cancel').hidden, false, 'cancel is offered since there is data to go back to');
+  });
+
+  document.getElementById('signin-token-input').value = FAKE_TOKEN;
+  document.getElementById('btn-connect').click();
+  await waitFor(() => document.getElementById('view-signin').hidden, 're-signed in');
+
+  check('reconnecting with the same token picks the existing gist back up, not a new one', () => {
+    assertEq(github.gists.size, 1, 'no duplicate gist created on reconnect');
   });
 
 } catch (err) {
