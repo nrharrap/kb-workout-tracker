@@ -38,6 +38,18 @@ const app = {
   notes: [],
 };
 
+// Read by exerciseCard()/checkAutoCollapse() (defined much further down, see
+// the "auto-collapse" section). Declared here — before boot() is invoked
+// below, not after, despite the natural instinct to keep it near the code
+// that uses it — because a real bug shipped from getting that backwards: a
+// `let` binding stays in its temporal dead zone until its declaration line
+// actually runs, and boot() calls render() synchronously (before boot()'s
+// own first await), so on any reload where a cycle already exists,
+// renderToday() would reference this while still in TDZ and throw —
+// aborting boot() before it ever reached loadRemote(), on every single
+// return visit.
+let currentPrescriptionMeta = {};
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
@@ -61,17 +73,27 @@ async function boot() {
   // it's trusted until an actual API call says otherwise (a 401, handled in
   // loadRemote()/flushQueue() below), rather than validated up front on
   // every load just to find out.
+  //
+  // client is set in the SAME breath as app.signedIn, not after the render()
+  // below — a real bug shipped here once: with client assigned only after
+  // that render(), the Save button rendered enabled (app.signedIn was
+  // already true) for however long loadRemote()'s network round trip took,
+  // and tapping Save inside that window hit flushQueue()'s `!client` guard,
+  // which queues the op and quietly gives up (setSync('idle')) with no
+  // further retry and no visible error — a silent, permanently-stuck "Not
+  // synced". Reported on Safari, where the window is more likely to be wide
+  // enough to tap into, but the race exists on any device.
   const savedToken = store.getAuthToken();
   if (savedToken) {
     auth.restore(savedToken, store.getAuthUsername());
     app.signedIn = true;
+    client = createGistClient(auth);
   }
 
   bindChrome();
   render();
 
   if (app.signedIn) {
-    client = createGistClient(auth);
     await loadRemote();
   }
   render();
@@ -610,8 +632,8 @@ function notesCard() {
 // This runs off targeted DOM edits rather than a full render() because
 // render() rebuilds every card's innerHTML — doing that on every keystroke
 // would drop focus out of the input the user is still typing into.
-
-let currentPrescriptionMeta = {};
+// (currentPrescriptionMeta itself is declared near the top of the file,
+// alongside `app` — see the comment there for why that placement matters.)
 
 function isExerciseComplete(exId) {
   const meta = currentPrescriptionMeta[exId];
@@ -1131,6 +1153,7 @@ document.addEventListener('click', async (e) => {
       auth.signOut();
       store.clearAuth(); // otherwise the token would silently restore itself on next open
       app.signedIn = false;
+      client = null; // kept in lockstep with signedIn everywhere — see boot()'s comment
       render();
       break;
 

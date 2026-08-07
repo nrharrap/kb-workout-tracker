@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kb-workout-tracker — boot reconnect race</title>
+<link rel="stylesheet" href="../css/styles.css">
+<style>
+  #report { position: fixed; inset: 0; z-index: 9999; overflow: auto; padding: 1.2rem;
+            background: #12141a; color: #e6e8ee; font: 14px/1.6 ui-monospace, Menlo, monospace; }
+  #report li { list-style: none; border-bottom: 1px solid #23262f; padding: .3rem 0; }
+  .pass::before { content: "PASS  "; color: #7ee2a0; }
+  .fail::before { content: "FAIL  "; color: #ff6b6b; }
+  pre.err { color: #ffb4b4; margin: .3rem 0 .4rem 3.5rem; white-space: pre-wrap; }
+  #summary { padding: .7rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-weight: 700; }
+  .ok { background: #16351f; color: #7ee2a0; } .bad { background: #3a1a1e; color: #ff9d9d; }
+</style>
+</head>
+<body>
+<div id="report"><div id="summary">Running…</div><ul id="rows"></ul></div>
+
+<script>
+// Same reasoning as integration.html: an import map, generated fresh and
+// applied before any module script runs, is what reliably forces every
+// module in the dependency graph to a fresh cache key regardless of import
+// depth in this environment.
+(function () {
+  const bust = Date.now();
+  const files = ['app.js', 'github.js', 'merge.js', 'model.js', 'programme.js', 'schema.js', 'store.js', 'sync.js'];
+  const imports = {};
+  for (const f of files) {
+    const abs = new URL(`../js/${f}`, location.href).href;
+    imports[abs] = `${abs}?t=${bust}`;
+  }
+  const s = document.createElement('script');
+  s.type = 'importmap';
+  s.textContent = JSON.stringify({ imports });
+  document.currentScript.after(s);
+})();
+</script>
+<script type="module">
+/**
+ * Regression test for a real bug reported in production: on a reload with
+ * an already-stored token (not the first connect — that path never had this
+ * gap), boot() used to set `app.signedIn = true` and then call render()
+ * *before* assigning the module-level `client`. That render() shows the
+ * Save button enabled (readOnly depends only on signedIn), but for however
+ * long the following loadRemote() network call takes, `client` is still
+ * null. A save tapped inside that window hit flushQueue()'s `!client`
+ * guard, which quietly gives up (setSync('idle')) with no further retry and
+ * no visible error — a permanently stuck "Not synced", reported from
+ * Safari, where real network latency makes the window easy to hit.
+ *
+ * The fix moved the client assignment to happen in the same breath as
+ * `app.signedIn = true`, before the first render(). This test proves the
+ * window is gone: it deliberately delays the network response loadRemote()
+ * is waiting on, then attempts a save in the instant right after import()
+ * resolves — the same instant a user's tap could land in production — and
+ * asserts the save is not silently lost.
+ */
+
+const results = [];
+const check = (name, fn) => { try { fn(); results.push({ name, passed: true }); }
+                              catch (e) { results.push({ name, passed: false, error: e.message }); } };
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+function assertEq(a, b, msg) {
+  if (a !== b) throw new Error(`${msg}\n    expected: ${JSON.stringify(b)}\n    actual:   ${JSON.stringify(a)}`);
+}
+const waitFor = async (fn, label, timeout = 4000) => {
+  const start = Date.now();
+  for (;;) {
+    try { const v = fn(); if (v) return v; } catch {}
+    if (Date.now() - start > timeout) throw new Error(`timed out waiting for: ${label}`);
+    await new Promise((r) => setTimeout(r, 30));
+  }
+};
+
+for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
+for (const key of await caches.keys()) await caches.delete(key);
+navigator.serviceWorker.register = () => Promise.reject(new Error('service worker disabled for this test run'));
+
+// --- fake GitHub API, with a deliberate delay on every request ---------------
+//
+// The delay is what makes the race window wide enough to reliably land a
+// save inside it, standing in for the real network latency that made this
+// reproducible on an actual phone but not always on a fast local network.
+
+const DATA_FILE_NAME = 'kb-workout-tracker-data.json';
+const FAKE_TOKEN = 'fake-pat-token';
+const REQUEST_DELAY_MS = 150;
+const github = { gists: new Map(), nextId: 1, rev: 0 };
+
+function jsonResponse(body, status = 200, headers = {}) {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+}
+function bumpRevision(gist) {
+  gist.updated_at = new Date().toISOString();
+  gist.history.unshift({ version: `sha-${++github.rev}`, committed_at: gist.updated_at });
+}
+
+// Seed a pre-existing gist, matching "already connected on a previous visit".
+{
+  const gist = { id: 'gist-1', created_at: new Date().toISOString(), files: {}, history: [] };
+  gist.files[DATA_FILE_NAME] = { content: JSON.stringify({ schemaVersion: 2, cycles: [], sessions: [], skips: [], retests: [], deleted: [] }), truncated: false };
+  bumpRevision(gist);
+  github.gists.set('gist-1', gist);
+}
+
+const realFetch = window.fetch.bind(window);
+window.fetch = async (input, init = {}) => {
+  const url = typeof input === 'string' ? input : input.url;
+  if (!/api\.github\.com/.test(url)) return realFetch(input, init);
+  await new Promise((r) => setTimeout(r, REQUEST_DELAY_MS));
+
+  const u = new URL(url);
+  const method = (init.method || 'GET').toUpperCase();
+  const auth = (init.headers || {}).Authorization || '';
+  const token = auth.replace(/^Bearer\s+/, '');
+  if (token !== FAKE_TOKEN) return jsonResponse({ message: 'Bad credentials' }, 401);
+
+  if (u.pathname === '/gists' && method === 'GET') {
+    return jsonResponse([...github.gists.values()].map((g) => ({ id: g.id, created_at: g.created_at, files: g.files })));
+  }
+  const single = u.pathname.match(/^\/gists\/([^/]+)$/);
+  if (single && method === 'GET') {
+    const g = github.gists.get(single[1]);
+    return g ? jsonResponse(g) : jsonResponse({ message: 'Not Found' }, 404);
+  }
+  if (single && method === 'PATCH') {
+    const g = github.gists.get(single[1]);
+    const body = JSON.parse(init.body);
+    Object.assign(g.files, body.files);
+    bumpRevision(g);
+    return jsonResponse(g);
+  }
+  return jsonResponse({ message: `unhandled ${method} ${u.pathname}` }, 500);
+};
+
+// --- simulate a reload with an already-stored token --------------------------
+
+localStorage.clear();
+localStorage.setItem('kbwt.authToken', JSON.stringify(FAKE_TOKEN));
+localStorage.setItem('kbwt.authUsername', JSON.stringify('nrharrap'));
+localStorage.setItem('kbwt.fileId', JSON.stringify('gist-1'));
+// A cached snapshot with a cycle already started, so Today renders straight
+// into a loggable session rather than the "Start Cycle 1" screen — closer to
+// what a real returning user sees, and gives the save something to enqueue.
+const seedData = { schemaVersion: 2, cycles: [{ cycleNumber: 1, startDate: new Date().toISOString().slice(0, 10), endedAt: null, loadOverrides: {} }], sessions: [], skips: [], retests: [], deleted: [] };
+localStorage.setItem('kbwt.snapshot', JSON.stringify(seedData));
+localStorage.setItem('kbwt.token', JSON.stringify(`sha-${github.rev}`));
+
+const html = await (await fetch('../index.html', { cache: 'no-store' })).text();
+const doc = new DOMParser().parseFromString(html, 'text/html');
+const report = document.getElementById('report');
+document.body.innerHTML = doc.body.innerHTML;
+document.body.appendChild(report);
+
+await import('../js/app.js'); // boot() starts; loadRemote()'s fetch is now in flight, delayed 150ms
+
+try {
+  check('immediately after import, the app already shows a loggable session (not the sign-in gate)', () => {
+    assert(document.getElementById('view-signin').hidden, 'a stored token should skip the gate entirely, even before loadRemote() resolves');
+    assert(!document.getElementById('tabbar').hidden, 'tabs available immediately — this is the state a real tap could land in');
+  });
+
+  // Log and save *inside* the network delay window — this is the exact
+  // moment that used to hit the bug.
+  const setValue = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+  const inputs = document.querySelectorAll('input[data-id="kb-swing-2h"]');
+  check('the session view is already interactive at this point', () => {
+    assert(inputs.length > 0, 'exercise inputs should already be in the DOM');
+  });
+  inputs.forEach((el) => {
+    const f = el.dataset.field;
+    setValue(el, f === 'kg' ? 16 : f === 'reps' ? 12 : 7);
+  });
+
+  const saveBtn = document.querySelector('[data-act="save-workout"]');
+  check('the Save button is not disabled during the loadRemote() window', () => {
+    assert(saveBtn && !saveBtn.disabled, 'if it renders disabled here, that is also an acceptable fix — just not what shipped');
+  });
+  saveBtn.click();
+
+  // The regression: this used to settle on "Not synced" (idle, with the op
+  // still queued) and stay there forever, since nothing else re-triggers a
+  // flush. The fix means it reaches 'synced' once the (delayed) network
+  // round trip completes.
+  await waitFor(
+    () => document.getElementById('sync-badge').dataset.state === 'synced',
+    'save to actually reach synced, not stall at "Not synced"'
+  );
+
+  check('the save reached the gist, not stuck queued forever', () => {
+    const badge = document.getElementById('sync-badge');
+    assertEq(badge.dataset.state, 'synced', 'badge state');
+    assertEq(badge.textContent, 'Synced', 'badge text');
+    assertEq(JSON.parse(localStorage.getItem('kbwt.pending')).length, 0, 'queue drained, not stuck');
+    const stored = JSON.parse(github.gists.get('gist-1').files[DATA_FILE_NAME].content);
+    assertEq(stored.sessions.length, 1, 'the session actually landed in the gist');
+  });
+
+} catch (err) {
+  results.push({ name: 'run aborted', passed: false, error: `${err.message}\n${err.stack || ''}` });
+}
+
+const failed = results.filter((r) => !r.passed);
+document.getElementById('rows').innerHTML = results.map((r) =>
+  `<li class="${r.passed ? 'pass' : 'fail'}">${r.name}</li>` +
+  (r.passed ? '' : `<pre class="err">${String(r.error).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>`)
+).join('');
+const s = document.getElementById('summary');
+s.className = failed.length ? 'bad' : 'ok';
+s.textContent = failed.length ? `${failed.length} FAILED of ${results.length}` : `All ${results.length} checks passed`;
+window.__integrationResults = { total: results.length, failed: failed.length, results };
+console.log(`BOOT-RACE: ${results.length - failed.length}/${results.length} passed`);
+failed.forEach((f) => console.error(`FAIL: ${f.name}\n${f.error}`));
+</script>
+</body>
+</html>
