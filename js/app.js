@@ -59,7 +59,15 @@ async function boot() {
   bindChrome();
   render();
 
+  // init() also consumes a token from the URL if this load is the browser
+  // returning from signIn()'s redirect (T2/T4).
   const ready = await auth.init();
+
+  const redirectError = auth.takeRedirectError();
+  if (redirectError) {
+    show('signin-error', `${redirectError.message} — you can try again.`);
+  }
+
   if (!ready) {
     setSync('offline', 'Google sign-in unavailable');
     show('signin-offline', app.data ? 'No connection. Showing your last synced data.' : 'No connection, and nothing cached yet.');
@@ -69,14 +77,21 @@ async function boot() {
 
   client = createDriveClient(auth);
 
-  // Silent renewal against an existing Google session; a rejection here just
-  // means "not signed in", which is a normal first-run state, not an error.
-  try {
-    await auth.requestToken({ interactive: false });
+  if (auth.isSignedIn()) {
+    // Just returned from a successful sign-in redirect.
     app.signedIn = true;
     await loadFromDrive();
-  } catch {
-    app.signedIn = false;
+  } else {
+    // Silent renewal against an existing Google session; a rejection here
+    // just means "not signed in", which is a normal first-run state, not an
+    // error.
+    try {
+      await auth.requestToken();
+      app.signedIn = true;
+      await loadFromDrive();
+    } catch {
+      app.signedIn = false;
+    }
   }
   render();
 }
@@ -101,18 +116,13 @@ function bindChrome() {
   }
 }
 
-async function signIn() {
+// A full-page redirect to Google and back (drive.js) rather than a popup —
+// popups were silently blocked on desktop regardless of how carefully the
+// call was timed. Nothing after auth.signIn() runs in this page load; the
+// browser navigates away immediately.
+function signIn() {
   hide('signin-error');
-  try {
-    await auth.requestToken({ interactive: true });
-    app.signedIn = true;
-    await loadFromDrive();
-  } catch (err) {
-    // T4 — declining the Google prompt shows a retry, it does not crash.
-    app.signedIn = false;
-    show('signin-error', `${err.message} — you can try again.`);
-  }
-  render();
+  auth.signIn();
 }
 
 async function loadFromDrive() {
@@ -1009,7 +1019,7 @@ document.addEventListener('click', async (e) => {
   }
 
   switch (act) {
-    case 'sign-in': await signIn(); break;
+    case 'sign-in': signIn(); break;
 
     case 'start-cycle': {
       const n = Number(t.dataset.n);

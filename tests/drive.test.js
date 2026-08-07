@@ -1,28 +1,124 @@
 /**
- * DriveAuth token-request timing.
+ * DriveAuth: the redirect-based interactive sign-in, and silent renewal.
  *
- * The bug this guards against: an interactive sign-in call that doesn't
- * invoke tokenClient.requestAccessToken() synchronously within the
- * triggering click's call stack gets its popup silently blocked by some
- * browsers (desktop Safari in particular) — no error, the button just does
- * nothing. It worked on mobile and failed on desktop precisely because
- * mobile browsers are more lenient about this. A functional fake that just
- * calls through to requestAccessToken() regardless of timing wouldn't catch
- * a regression here — the test has to check synchronously, without
- * awaiting, that the call already happened.
+ * Interactive sign-in used to be a GIS popup. That got silently blocked on
+ * desktop Safari (and some Chrome configurations) regardless of how
+ * carefully the triggering call was timed — no error, the button just did
+ * nothing. It's now a full-page redirect to Google and back instead, which
+ * can't be popup-blocked at all. These tests cover the two pure pieces of
+ * that flow (the URL built to send the browser to, and the fragment parsed
+ * out of the URL when it comes back) plus the queuing behaviour that's still
+ * needed for silent renewal.
  */
 
 import { test, assert } from './harness.js';
-import { DriveAuth } from '../js/drive.js';
+import { DriveAuth, buildAuthUrl, parseRedirectFragment, redirectUri } from '../js/drive.js';
+
+// --- pure helpers ------------------------------------------------------------
+
+test('buildAuthUrl encodes the implicit-flow request Google expects', () => {
+  const url = new URL(buildAuthUrl('client-123', 'https://example.com/app/', 'state-abc'));
+
+  assert.equal(url.origin + url.pathname, 'https://accounts.google.com/o/oauth2/v2/auth');
+  assert.equal(url.searchParams.get('client_id'), 'client-123');
+  assert.equal(url.searchParams.get('redirect_uri'), 'https://example.com/app/');
+  assert.equal(url.searchParams.get('response_type'), 'token');
+  assert.equal(url.searchParams.get('state'), 'state-abc');
+  assert.equal(url.searchParams.get('scope'), 'https://www.googleapis.com/auth/drive.file');
+});
+
+test('redirectUri is the origin plus path, dropping any query or fragment', () => {
+  const fakeLocation = { origin: 'https://nrharrap.github.io', pathname: '/kb-workout-tracker/', search: '?x=1', hash: '#y' };
+  assert.equal(redirectUri(fakeLocation), 'https://nrharrap.github.io/kb-workout-tracker/');
+});
+
+test('parseRedirectFragment reads a successful return', () => {
+  const parsed = parseRedirectFragment('#access_token=tok-1&expires_in=3599&state=abc&token_type=Bearer');
+  assert.equal(parsed.accessToken, 'tok-1');
+  assert.equal(parsed.expiresIn, '3599');
+  assert.equal(parsed.state, 'abc');
+  assert.isNull(parsed.error);
+});
+
+test('parseRedirectFragment reads a declined-consent return', () => {
+  const parsed = parseRedirectFragment('#error=access_denied&state=abc');
+  assert.equal(parsed.error, 'access_denied');
+  assert.isNull(parsed.accessToken);
+});
+
+test('parseRedirectFragment returns null for an ordinary page load', () => {
+  assert.isNull(parseRedirectFragment(''));
+  assert.isNull(parseRedirectFragment('#'));
+  assert.isNull(parseRedirectFragment(undefined));
+});
+
+// --- DriveAuth: consuming the redirect return --------------------------------
+//
+// window.location can't be reassigned in a browser test page, so these drive
+// the actual DriveAuth methods but exercise _consumeRedirectToken() through a
+// real (harmless) location.hash on this very test page, cleaning up after
+// itself. history.replaceState keeps it from touching browser history.
+
+function withHash(hash, fn) {
+  const originalHash = window.location.hash;
+  window.location.hash = hash;
+  try {
+    return fn();
+  } finally {
+    history.replaceState(null, '', window.location.pathname + window.location.search + originalHash);
+  }
+}
+
+test('a matching state consumes the token and clears the fragment', () => {
+  const auth = new DriveAuth('fake-client-id');
+  sessionStorage.setItem('kbwt.oauthState', 'expected-state');
+
+  withHash('#access_token=tok-9&expires_in=3600&state=expected-state', () => {
+    auth._consumeRedirectToken();
+  });
+
+  assert.equal(auth.accessToken, 'tok-9');
+  assert.equal(auth.isSignedIn(), true);
+  assert.isNull(sessionStorage.getItem('kbwt.oauthState'), 'one-time use — cleared after consuming');
+});
+
+test('a mismatched state is not trusted (CSRF guard)', () => {
+  const auth = new DriveAuth('fake-client-id');
+  sessionStorage.setItem('kbwt.oauthState', 'expected-state');
+
+  withHash('#access_token=tok-evil&expires_in=3600&state=wrong-state', () => {
+    auth._consumeRedirectToken();
+  });
+
+  assert.isNull(auth.accessToken, 'a token whose state does not match this session is ignored');
+});
+
+test('a declined-consent return surfaces as a takeable error, once', () => {
+  const auth = new DriveAuth('fake-client-id');
+  sessionStorage.setItem('kbwt.oauthState', 'expected-state');
+
+  withHash('#error=access_denied&error_description=User+cancelled&state=expected-state', () => {
+    auth._consumeRedirectToken();
+  });
+
+  const err = auth.takeRedirectError();
+  assert.ok(err, 'the decline is surfaced');
+  assert.equal(err.message, 'User cancelled');
+  assert.isNull(auth.takeRedirectError(), 'consumed only once');
+});
+
+test('an ordinary page load with no fragment leaves auth state untouched', () => {
+  const auth = new DriveAuth('fake-client-id');
+  withHash('', () => auth._consumeRedirectToken());
+  assert.isNull(auth.accessToken);
+  assert.isNull(auth.takeRedirectError());
+});
+
+// --- silent renewal queue (unchanged behaviour, still needed) ---------------
 
 function fakeTokenClient() {
   const calls = [];
-  return {
-    calls,
-    requestAccessToken({ prompt }) {
-      calls.push({ prompt, at: calls.length });
-    },
-  };
+  return { calls, requestAccessToken({ prompt }) { calls.push({ prompt }); } };
 }
 
 function authWithFakeClient() {
@@ -31,81 +127,33 @@ function authWithFakeClient() {
   return auth;
 }
 
-test('an interactive request calls requestAccessToken synchronously, not after a microtask', () => {
+test('a silent request queues behind one already in flight, and a settled one needs no second round trip', async () => {
   const auth = authWithFakeClient();
 
-  // Deliberately not awaited — a regression here (routing through a
-  // `.then()` queue) would mean requestAccessToken() hasn't been called yet
-  // at this line, even though it eventually would be a tick later.
-  const promise = auth.requestToken({ interactive: true });
-
-  assert.equal(auth.tokenClient.calls.length, 1, 'requestAccessToken should already have been called');
-  assert.equal(auth.tokenClient.calls[0].prompt, 'consent');
-
-  promise.catch(() => {}); // never resolved in this test; avoid an unhandled rejection
-});
-
-test('a silent request still queues behind one already in flight', async () => {
-  const auth = authWithFakeClient();
-
-  // Silent requests are deferred by a microtask (the `.then()` queue), unlike
-  // interactive ones — so unlike the synchronous-call test above, this one
-  // has to let a tick pass before either call has actually fired.
-  const first = auth.requestToken({ interactive: false });
+  const first = auth.requestToken();
   await Promise.resolve();
-  assert.equal(auth.tokenClient.calls.length, 1, 'the first silent request fires once queued');
+  assert.equal(auth.tokenClient.calls.length, 1);
+  assert.equal(auth.tokenClient.calls[0].prompt, '', 'silent renewal never forces the consent screen');
 
-  const second = auth.requestToken({ interactive: false });
+  const second = auth.requestToken();
   await Promise.resolve();
-  assert.equal(auth.tokenClient.calls.length, 1, 'the second silent request should wait its turn, not fire alongside the first');
+  assert.equal(auth.tokenClient.calls.length, 1, 'the second waits its turn rather than firing alongside the first');
 
   auth.tokenClient.callback({ access_token: 'tok-1', expires_in: 3600 });
   assert.equal(await first, 'tok-1');
 
-  // By the time the second request gets its turn, isSignedIn() is already
-  // true from the first — so it resolves straight from that check, with no
-  // second popup call needed.
   assert.equal(await second, 'tok-1');
-  assert.equal(auth.tokenClient.calls.length, 1, 'the second request needed no round trip once already signed in');
+  assert.equal(auth.tokenClient.calls.length, 1, 'already signed in by the time its turn came — no round trip needed');
 });
 
-test('an interactive request jumps the queue and supersedes a pending silent one', async () => {
-  const auth = authWithFakeClient();
+test('getToken reuses a token consumed from a redirect without calling GIS at all', async () => {
+  const auth = new DriveAuth('fake-client-id');
+  sessionStorage.setItem('kbwt.oauthState', 's');
+  withHash('#access_token=tok-redirect&expires_in=3600&state=s', () => auth._consumeRedirectToken());
 
-  const silent = auth.requestToken({ interactive: false });
-  await Promise.resolve(); // silent requests fire on the next microtask, not synchronously
-  assert.equal(auth.tokenClient.calls.length, 1, 'the silent request already fired');
+  auth.tokenClient = fakeTokenClient(); // present, but should never be touched
+  const token = await auth.getToken();
 
-  const interactive = auth.requestToken({ interactive: true });
-  assert.equal(auth.tokenClient.calls.length, 2, 'the interactive request does not wait behind it');
-  assert.equal(auth.tokenClient.calls[1].prompt, 'consent');
-
-  // Rejection has to propagate through the queue's own `.then()` wrapper
-  // before reaching this promise, which takes an extra microtask tick or two
-  // beyond the reject() call itself — awaiting `silent` directly waits
-  // however many ticks that actually takes. A single Promise.resolve() tick
-  // (tried first) undercounted this and failed even though the rejection
-  // does happen correctly, one tick later.
-  let silentRejected = false;
-  try {
-    await silent;
-  } catch {
-    silentRejected = true;
-  }
-  assert.equal(silentRejected, true, 'the superseded silent request is rejected, not left hanging forever');
-
-  auth.tokenClient.callback({ access_token: 'tok-2', expires_in: 3600 });
-  assert.equal(await interactive, 'tok-2');
-});
-
-test('a successful token satisfies a request queued behind it without a second popup', async () => {
-  const auth = authWithFakeClient();
-
-  const first = auth.requestToken({ interactive: true });
-  auth.tokenClient.callback({ access_token: 'tok-3', expires_in: 3600 });
-  await first;
-
-  const second = await auth.requestToken({ interactive: false });
-  assert.equal(second, 'tok-3', 'already signed in — no round trip needed');
-  assert.equal(auth.tokenClient.calls.length, 1, 'only the original popup call was made');
+  assert.equal(token, 'tok-redirect');
+  assert.equal(auth.tokenClient.calls.length, 0);
 });

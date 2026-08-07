@@ -138,7 +138,24 @@ window.google = {
   },
 };
 
-// --- load the real markup, then the real app --------------------------------
+// --- simulate arriving already signed in, via a redirect return -------------
+//
+// signIn() (drive.js) is now a full-page redirect to Google and back, not a
+// popup — popups turned out to be silently blockable on desktop browsers
+// regardless of call timing, with no error shown. That means "click the
+// button, get a token back" can no longer be simulated within one continuous
+// script by faking a GIS popup callback: the redirect genuinely leaves the
+// page, and a fresh page load is what picks the token up from the URL. So
+// this seeds a valid redirect return (matching sessionStorage state + URL
+// fragment) *before* importing app.js, simulating the page load that follows
+// Google sending the browser back — the same entry point boot() uses for
+// real. The pure mechanics (building the outbound URL, parsing a returned
+// fragment, a declined consent, a mismatched/forged state) are unit-tested
+// directly in tests/drive.test.js; this covers the DOM wiring on top of
+// that — that boot() correctly turns a consumed token into a loaded session.
+const oauthState = 'integration-test-state';
+sessionStorage.setItem('kbwt.oauthState', oauthState);
+location.hash = `access_token=fake-token&expires_in=3600&state=${oauthState}&token_type=Bearer`;
 
 localStorage.clear();
 
@@ -153,24 +170,23 @@ await import('../js/app.js');
 // --- the run ----------------------------------------------------------------
 
 try {
-  // T1 — first open, no prior sign-in.
-  //
-  // This deliberately clicks Sign in while boot's silent renewal is still in
-  // flight, because that overlap is exactly what broke: the GIS token client
-  // has one `callback` slot, so the interactive request overwrote the silent
-  // one's handler and then received the silent one's rejection. DriveAuth now
-  // serialises token requests; leaving the race in the test keeps that fixed.
-  await waitFor(() => !document.getElementById('view-signin').hidden, 'sign-in gate');
+  // T1 — checked the instant import() resolves: boot()'s first render() runs
+  // synchronously, before auth.init() — and the redirect-token consumption
+  // inside it — has had any chance to resolve. So the sign-in gate is
+  // reliably still showing at exactly this point, the same as a genuinely
+  // fresh, signed-out load looks.
   check('T1 — first open shows the sign-in gate', () => {
     assert(!document.getElementById('view-signin').hidden, 'sign-in view should be visible');
     assert(document.getElementById('tabbar').hidden, 'tabs hidden until signed in');
     assertEq(drive.files.size, 0, 'nothing touched in Drive before sign-in');
   });
 
-  // T2 — sign in; the data file is created.
-  document.getElementById('btn-signin').click();
+  // T2 — the redirect return above completes: the token is consumed, the URL
+  // is cleaned up, and the app proceeds to create data.json.
   await waitFor(() => document.getElementById('view-signin').hidden, 'signed in');
-  check('T2 — signing in creates data.json and loads the app', () => {
+  check('T2 — a redirect return consumes the token, cleans the URL, and creates data.json', () => {
+    assertEq(location.hash, '', 'the token does not linger in the address bar or browser history');
+    assertEq(sessionStorage.getItem('kbwt.oauthState'), null, 'one-time use — the CSRF state guard is cleared');
     assertEq(drive.files.size, 1, 'exactly one data file created');
     assertEq([...drive.files.values()][0].name, 'kb-workout-tracker-data.json', 'file name');
     assert(!document.getElementById('tabbar').hidden, 'tabs now available');
